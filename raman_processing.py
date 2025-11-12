@@ -39,34 +39,40 @@ def lorentz(x, amp, cen, wid, offset):
 
 def asls_baseline(y, lam=1e5, p=0.01, niter=10):
     """
-    Asymmetric Least Squares baseline correction.
+    Asymmetric Least Squares baseline correction (robusto).
     lam  — suavização (lambda)
     p    — peso assimétrico (0–1)
     niter — iterações
     """
+    import numpy as np
     from scipy import sparse
     from scipy.sparse.linalg import spsolve
 
     y = np.asarray(y, dtype=float)
     N = len(y)
     if N < 5:
-        # fallback para sinais muito curtos
+        # fallback para sinais muito curtos: retorna zero baseline (ou suaviza)
         return np.zeros_like(y)
 
-    # matriz de diferenças de segunda ordem
-    E = sparse.eye(N, format="csc")
-    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(N, N))
-    D = D[2:, :]  # garante forma correta
+    # --- construir a matriz de segunda diferença D com shape (N-2, N)
+    # cada linha i tem [1, -2, 1] nas colunas [i, i+1, i+2]
+    diag0 = np.ones(N - 2)
+    diag1 = -2.0 * np.ones(N - 2)
+    diag2 = np.ones(N - 2)
+    # offsets [0,1,2] nas linhas -> forma (N-2, N)
+    D = sparse.diags([diag0, diag1, diag2], offsets=[0, 1, 2], shape=(N - 2, N), format="csc")
 
+    # inicializa pesos
     w = np.ones(N)
     for _ in range(niter):
-        W = sparse.diags(w, 0, shape=(N, N))
-        Z = W + lam * D.T.dot(D)
+        W = sparse.diags(w, 0, shape=(N, N), format="csc")
+        Z = W + lam * (D.T.dot(D))
+        # resolve Z z = W y
         z = spsolve(Z, w * y)
+        # atualizar pesos (assimetria)
         w = p * (y > z) + (1 - p) * (y < z)
+
     return z
-
-
 # ===============================
 #  Ajuste Lorentziano
 # ===============================
