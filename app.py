@@ -28,7 +28,7 @@ from supabase import create_client, Client
 # Pipeline de Raman (coloque raman_processing.py no mesmo diretório)
 try:
     from raman_processing import process_raman_pipeline
-except Exception as e:
+except Exception:
     process_raman_pipeline = None
     # We'll surface the error in UI
 
@@ -38,22 +38,45 @@ except Exception as e:
 st.set_page_config(page_title="Plataforma Raman — Pacientes & Ensaios", layout="wide", page_icon="🧬")
 st.title("🧬 Plataforma Raman — Análise Molecular do Sangue")
 
-# ---------------------------
-# Conexão Supabase
-# (defina SUPABASE_URL e SUPABASE_KEY em st.secrets)
-# ---------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
-
-supabase: Optional[Client] = None
-if SUPABASE_URL and SUPABASE_KEY:
+# ============================================
+# 🔌 Conexão com Supabase + Diagnóstico
+# ============================================
+def init_supabase():
+    """Cria cliente Supabase e testa conexão."""
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        SUPABASE_URL = st.secrets["SUPABASE_URL"]
+        SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     except Exception as e:
-        st.error(f"Erro conectando ao Supabase: {e}")
-        supabase = None
-else:
-    st.warning("⚠️ Coloque SUPABASE_URL e SUPABASE_KEY em st.secrets para habilitar salvamentos no banco.")
+        st.sidebar.error(f"❌ Falta variável em st.secrets: {e}")
+        return None
+
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # teste rápido: buscar primeira linha da tabela patients (não falha se tabela vazia)
+        try:
+            res = client.table("patients").select("id").limit(1).execute()
+            # dependendo da versão do client, res pode ter .status_code ou apenas .data
+            if hasattr(res, "status_code"):
+                ok = res.status_code in (200, 201)
+            else:
+                ok = True
+            if ok:
+                st.sidebar.success("✅ Supabase conectado com sucesso!")
+            else:
+                st.sidebar.warning("⚠️ Supabase respondeu, mas sem status esperado.")
+        except Exception as e:
+            # Pode falhar se a tabela não existir — ainda assim retornamos o cliente
+            st.sidebar.warning(f"⚠️ Não foi possível consultar tabela 'patients': {e}")
+        return client
+    except Exception as e:
+        st.sidebar.error(f"❌ Erro ao conectar Supabase: {e}")
+        return None
+
+# inicializa o cliente global
+supabase: Optional[Client] = init_supabase()
+# Não interrompemos rigidamente: permitimos executar a UI mesmo sem supabase, mas operações de save avisarão.
+# if not supabase:
+#     st.stop()
 
 # ---------------------------
 # Utilidades Supabase (seguras)
@@ -68,14 +91,16 @@ def safe_insert(table: str, records: List[Dict]):
     for i in range(0, len(records), batch):
         chunk = records[i:i+batch]
         res = supabase.table(table).insert(chunk).execute()
-        if res.error:
+        if hasattr(res, "error") and res.error:
             raise RuntimeError(f"Erro inserindo em {table}: {res.error.message if hasattr(res.error,'message') else res.error}")
         out.extend(res.data or [])
     return out
 
 def create_patient_record(patient_obj: Dict) -> Dict:
+    if not supabase:
+        raise RuntimeError("Supabase não configurado.")
     res = supabase.table("patients").insert(patient_obj).execute()
-    if res.error:
+    if hasattr(res, "error") and res.error:
         raise RuntimeError(res.error.message)
     return res.data[0]
 
@@ -94,15 +119,19 @@ def find_patient_by_email_or_cpf(email: Optional[str], cpf: Optional[str]) -> Op
     return None
 
 def create_sample_record(sample_obj: Dict) -> Dict:
+    if not supabase:
+        raise RuntimeError("Supabase não configurado.")
     res = supabase.table("samples").insert(sample_obj).execute()
-    if res.error:
+    if hasattr(res, "error") and res.error:
         raise RuntimeError(res.error.message)
     return res.data[0]
 
 def create_measurement_record(sample_id: int, ensaio_type: str, operator: Optional[str]=None, notes: Optional[str]=None) -> int:
+    if not supabase:
+        raise RuntimeError("Supabase não configurado.")
     rec = {"sample_id": sample_id, "type": ensaio_type, "operator": operator, "notes": notes}
     res = supabase.table("measurements").insert(rec).execute()
-    if res.error:
+    if hasattr(res, "error") and res.error:
         raise RuntimeError(res.error.message)
     return res.data[0]["id"]
 
