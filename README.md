@@ -18,16 +18,16 @@ Desenvolvido em Python, totalmente modular e compatível com **deploy via GitHub
 
 ## Funcionalidades Principais
 1 Cadastro de Pacientes e Amostras
-- Importação automática de pacientes via **Google Forms (CSV)**.  
+- Importação automática de pacientes via **Google Forms**.  
 - Criação manual de pacientes diretamente na interface.  
-- Importação em lote de **espectros Raman brutos** a partir de arquivos `.zip`, com:
+- Importação em lote de **espectros Raman brutos**
   - Mapeamento automático (nome do arquivo → paciente).  
-  - Suporte a `mapping.csv` (colunas: `filename`, `full_name`, `email`, `cpf`).  
+  - Suporte a `mapping.csv` (colunas: `filename`, `full_name`, `email`, `identificador`).  
   - Criação automática de pacientes e amostras no Supabase.  
-  - Processamento de **20 arquivos por vez** para evitar erros e timeouts.
+  - Processamento de **10 arquivos por vez** para evitar erros e timeouts.
 
 2 Espectrometria Raman (Análise Molecular)
-- Processamento completo via módulo `raman_processing_v2.py`:  
+- Processamento completo via módulo `raman_processing.py`:  
   - Remoção de substrato e baseline.  
   - Suavização com **Savitzky-Golay filter**.  
   - Detecção e ajuste **Lorentziano** de picos.  
@@ -36,7 +36,7 @@ Desenvolvido em Python, totalmente modular e compatível com **deploy via GitHub
 - Visualização:
   - Gráfico principal (ajuste total + baseline + picos).  
   - Gráfico de **resíduo** (diferença entre modelo e dados experimentais).  
-  - Download dos espectros e picos detectados em CSV.  
+  - Download dos espectros e picos detectados.
 
 3 Otimização (IA)
 - Treinamento de modelos **Random Forest** para classificar espectros rotulados.  
@@ -49,12 +49,12 @@ Desenvolvido em Python, totalmente modular e compatível com **deploy via GitHub
 
 bio_sensor_app/
 │
-├── app.py                      # Aplicativo principal (3 abas)
-├── raman_processing_v2.py      # Pipeline de análise Raman (baseline, picos, plot)
-├── requirements.txt            # Dependências do Python
-├── README.md                   # Este arquivo
+├── app.py                   
+├── raman_processing_v2.py     
+├── requirements.txt            
+├── README.md                   
 └── utils/
-    └── batch_import_zip.py     # Importador em lotes (ZIP de espectros)
+    └── batch_import.py    
 
 ## Créditos
 
