@@ -40,8 +40,8 @@ except Exception as e:
 # ---------------------------
 # Config Streamlit
 # ---------------------------
-st.set_page_config(page_title="Plataforma Raman — Pacientes & Ensaios", layout="wide", page_icon="🧬")
-st.title("🧬 Plataforma Raman — Análise Molecular do Sangue")
+st.set_page_config(page_title="Plataforma Raman — Pacientes & Ensaios", layout="wide", page_icon="*")
+st.title("*Plataforma Raman — Análise Molecular do Sangue*")
 
 # ---------------------------
 # Conexão Supabase (st.secrets)
