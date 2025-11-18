@@ -27,7 +27,7 @@ from supabase import create_client, Client
 
 # Pipeline
 try:
-    from raman_processing_v2 import process_raman_pipeline
+   from raman_processing import process_raman_pipeline
 except Exception as e:
     process_raman_pipeline = None
 
