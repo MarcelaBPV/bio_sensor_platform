@@ -1,15 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-raman_processing_v2.py
-Versão aprimorada do pipeline Raman com plots "main + residual".
-Inclui:
-- leitura e reamostragem robusta
-- alpha com regressão (intercepto) e trim central
-- ASLS baseline robusta
-- Savitzky-Golay smoothing
-- detecção de picos e ajuste Lorentziano
-- construção de modelo total (baseline + soma de lorentzianas) e plot do resíduo
-Retorna: ((x_common, y_norm), peaks_df, fig)
+raman_processing.py
+Versão com _apply_smoothing integrada.
 """
 import numpy as np
 import pandas as pd
@@ -20,6 +12,69 @@ from scipy.sparse.linalg import spsolve
 import matplotlib.pyplot as plt
 from typing import Tuple
 
+# tentativa segura de importar messagebox (em servidores/headless pode falhar)
+try:
+    from tkinter import messagebox
+except Exception:
+    class _DummyMsg:
+        def showwarning(self, *args, **kwargs):
+            print("warning:", args, kwargs)
+    messagebox = _DummyMsg()
+
+# ---- sua função de suavização (copiada/adaptada) ----
+def _apply_smoothing(self_or_none, y_data, window, order):
+    """Aplica a suavização Savitzky-Golay (baseado no código existente).
+
+    Nota: mantive a assinatura para aceitar um 'self' caso queira integrar como método.
+    Se usar como função standalone, passe None no primeiro argumento.
+    """
+    try:
+        # se for chamado como método, o primeiro argumento pode ser 'self'
+        # então detectamos e realinhamos parâmetros quando necessário
+        if y_data is None and window is None and order is None:
+            # caso chamem erradamente, retorna sem mudanças
+            return y_data
+
+        win = int(window)
+        if win % 2 == 0:
+            win += 1
+        poly = int(order)
+
+        # Verifica se a janela é válida
+        if win < 3:  # Janela mínima para SavGol é 3
+            print(f"Aviso: Janela SavGol ({win}) inválida (<3). Suavização não aplicada.")
+            return y_data
+        if win >= len(y_data):
+            # ajusta para o maior ímpar menor que len(y_data)
+            if len(y_data) % 2 == 0:
+                win = len(y_data) - 1
+            else:
+                win = len(y_data) - 2
+            if win < 3:
+                print(f"Aviso: Janela SavGol ajustada ({win}) inválida (<3). Suavização não aplicada.")
+                return y_data
+        if win <= poly:
+            print(f"Aviso: Janela SavGol ({win}) <= Ordem ({poly}). Suavização não aplicada.")
+            return y_data
+
+        # espera um pd.Series (para preservar index), mas aceita array-like
+        if isinstance(y_data, pd.Series):
+            arr = y_data.values
+            idx = y_data.index
+            sm = savgol_filter(arr, window_length=win, polyorder=poly)
+            return pd.Series(sm, index=idx)
+        else:
+            # se não for Series, aplica diretamente e retorna mesmo tipo (np.array)
+            return pd.Series(savgol_filter(np.asarray(y_data), window_length=win, polyorder=poly))
+    except Exception as e:
+        print(f"Erro ao aplicar suavização: {e}")
+        try:
+            messagebox.showwarning("Erro de Suavização", f"Não foi possível aplicar a suavização.\nVerifique Janela/Ordem.\n{e}")
+        except Exception:
+            # já logamos acima — evitar crash em ambiente sem GUI
+            pass
+        return y_data
+
 # ---- IO helper (flexível) ----
 def read_spectrum(file_like):
     """Lê espectro de arquivo-like (csv/txt). Retorna x, y ordenados."""
@@ -28,7 +83,6 @@ def read_spectrum(file_like):
     except Exception:
         file_like.seek(0)
         df = pd.read_csv(file_like, delim_whitespace=True, header=None)
-    # keep numeric columns
     df = df.select_dtypes(include=[np.number])
     if df.shape[1] < 2:
         raise ValueError('Arquivo deve ter ao menos duas colunas numéricas (x, y).')
@@ -67,7 +121,6 @@ def asls_baseline(y, lam=1e5, p=0.01, niter=10):
     N = len(y)
     if N < 5:
         return np.zeros_like(y)
-    # criar D (N-2, N) com [1, -2, 1]
     diag0 = np.ones(N-2)
     diag1 = -2.0 * np.ones(N-2)
     diag2 = np.ones(N-2)
@@ -139,7 +192,7 @@ def process_raman_pipeline(
     baseline = asls_baseline(y_sub, lam=asls_lambda, p=asls_p, niter=12)
     y_corr = y_sub - baseline
 
-    # SG smoothing (ajustando janela)
+    # SG smoothing (AJUSTADO para usar _apply_smoothing)
     sg_window = int(sg_window)
     if sg_window % 2 == 0:
         sg_window += 1
@@ -147,10 +200,17 @@ def process_raman_pipeline(
         sg_window = max(3, len(y_corr)-1)
         if sg_window % 2 == 0:
             sg_window -= 1
+
+    # converte para pd.Series com índice x_common para preservar index no retorno
+    y_corr_series = pd.Series(y_corr, index=x_common)
+    # chamando sua função: primeiro argumento pode ser None (não usado)
+    y_smooth_series = _apply_smoothing(None, y_corr_series, sg_window, sg_poly)
+    # garantir numpy array para as etapas seguintes
     try:
-        y_smooth = savgol_filter(y_corr, window_length=sg_window, polyorder=int(sg_poly))
+        y_smooth = np.asarray(y_smooth_series.values if isinstance(y_smooth_series, pd.Series) else y_smooth_series, dtype=float)
     except Exception:
-        y_smooth = y_corr
+        # fallback: se algo falhar, usa y_corr bruto
+        y_smooth = np.asarray(y_corr, dtype=float)
 
     # normalizacao (para detecção e visual)
     denom = np.nanmax(np.abs(y_smooth))
