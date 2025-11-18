@@ -1,167 +1,150 @@
 # -*- coding: utf-8 -*-
 """
-raman_processing.py — versão segura (nov/2025)
-Pipeline robusto para espectros Raman:
-- leitura e reamostragem
-- subtração de substrato (com alpha)
-- correção de baseline (ASLS)
-- suavização (Savitzky-Golay)
-- detecção e ajuste lorentziano de picos
+raman_processing_v2.py
+Versão aprimorada do pipeline Raman com plots "main + residual".
+Inclui:
+- leitura e reamostragem robusta
+- alpha com regressão (intercepto) e trim central
+- ASLS baseline robusta
+- Savitzky-Golay smoothing
+- detecção de picos e ajuste Lorentziano
+- construção de modelo total (baseline + soma de lorentzianas) e plot do resíduo
+Retorna: ((x_common, y_norm), peaks_df, fig)
 """
-
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter, find_peaks
 from scipy.optimize import curve_fit
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+import matplotlib.pyplot as plt
+from typing import Tuple
 
-# ===============================
-#  Funções auxiliares básicas
-# ===============================
-
+# ---- IO helper (flexível) ----
 def read_spectrum(file_like):
-    """Lê espectro .txt ou .csv com duas colunas (x, y)."""
-    df = pd.read_csv(file_like, sep=None, engine="python", comment="#", header=None)
-    if df.shape[1] < 2:
-        raise ValueError("Arquivo deve conter ao menos duas colunas (x, y).")
-    x = np.array(df.iloc[:, 0], dtype=float)
-    y = np.array(df.iloc[:, 1], dtype=float)
-    return x, y
-
-
-def lorentz(x, amp, cen, wid, offset):
-    """Função Lorentziana simples."""
-    return amp * (0.5 * wid)**2 / ((x - cen)**2 + (0.5 * wid)**2) + offset
-
-
-# ===============================
-#  Baseline ASLS (robusto)
-# ===============================
-
-def asls_baseline(y, lam=1e5, p=0.01, niter=10):
-    """
-    Asymmetric Least Squares baseline correction (robusto).
-    lam  — suavização (lambda)
-    p    — peso assimétrico (0–1)
-    niter — iterações
-    """
-    import numpy as np
-    from scipy import sparse
-    from scipy.sparse.linalg import spsolve
-
-    y = np.asarray(y, dtype=float)
-    N = len(y)
-    if N < 5:
-        # fallback para sinais muito curtos: retorna zero baseline (ou suaviza)
-        return np.zeros_like(y)
-
-    # --- construir a matriz de segunda diferença D com shape (N-2, N)
-    # cada linha i tem [1, -2, 1] nas colunas [i, i+1, i+2]
-    diag0 = np.ones(N - 2)
-    diag1 = -2.0 * np.ones(N - 2)
-    diag2 = np.ones(N - 2)
-    # offsets [0,1,2] nas linhas -> forma (N-2, N)
-    D = sparse.diags([diag0, diag1, diag2], offsets=[0, 1, 2], shape=(N - 2, N), format="csc")
-
-    # inicializa pesos
-    w = np.ones(N)
-    for _ in range(niter):
-        W = sparse.diags(w, 0, shape=(N, N), format="csc")
-        Z = W + lam * (D.T.dot(D))
-        # resolve Z z = W y
-        z = spsolve(Z, w * y)
-        # atualizar pesos (assimetria)
-        w = p * (y > z) + (1 - p) * (y < z)
-
-    return z
-# ===============================
-#  Ajuste Lorentziano
-# ===============================
-
-def fit_lorentzian(x, y, x0, window=10.0):
-    """Ajusta um pico individual em torno de x0 com perfil lorentziano."""
-    x = np.array(x, dtype=float)
-    y = np.array(y, dtype=float)
-
-    # Selecionar região ao redor do pico
-    mask = (x >= x0 - window / 2) & (x <= x0 + window / 2)
-    if np.sum(mask) < 5:
-        return None
-
-    x_fit = x[mask]
-    y_fit = y[mask]
-    amp0 = np.max(y_fit) - np.min(y_fit)
-    off0 = np.min(y_fit)
-    wid0 = window / 4
-
+    """Lê espectro de arquivo-like (csv/txt). Retorna x, y ordenados."""
     try:
-        popt, _ = curve_fit(lorentz, x_fit, y_fit, p0=[amp0, x0, wid0, off0], maxfev=5000)
+        df = pd.read_csv(file_like, sep=None, engine='python', comment='#', header=None)
+    except Exception:
+        file_like.seek(0)
+        df = pd.read_csv(file_like, delim_whitespace=True, header=None)
+    # keep numeric columns
+    df = df.select_dtypes(include=[np.number])
+    if df.shape[1] < 2:
+        raise ValueError('Arquivo deve ter ao menos duas colunas numéricas (x, y).')
+    x = np.asarray(df.iloc[:,0], dtype=float)
+    y = np.asarray(df.iloc[:,1], dtype=float)
+    order = np.argsort(x)
+    return x[order], y[order]
+
+# ---- Lorentzian ----
+def lorentz(x, amp, cen, wid, offset):
+    return amp * ( (0.5*wid)**2 / ( (x-cen)**2 + (0.5*wid)**2 ) ) + offset
+
+def fit_lorentzian(x, y, x0, window=20.0):
+    mask = (x >= x0 - window/2) & (x <= x0 + window/2)
+    if mask.sum() < 5:
+        return None
+    xs = x[mask]; ys = y[mask]
+    amp0 = max(np.nanmax(ys)-np.nanmin(ys), 1e-6)
+    off0 = np.nanmin(ys)
+    wid0 = max((xs.max()-xs.min())/6.0, 1.0)
+    p0 = [amp0, x0, wid0, off0]
+    try:
+        popt, _ = curve_fit(
+            lorentz, xs, ys, p0=p0,
+            bounds=([0, x0-10, 1e-6, -np.inf],[np.inf, x0+10, (xs.ptp())*2, np.inf]),
+            maxfev=5000
+        )
         amp, cen, wid, off = popt
-        fwhm = 2 * np.abs(wid)
-        return {"fit_amp": amp, "fit_cen": cen, "fit_width": wid, "fit_fwhm": fwhm, "fit_offset": off}
+        return {"fit_amp": float(amp), "fit_cen": float(cen), "fit_width": float(wid), "fit_fwhm": float(2*wid), "fit_offset": float(off)}
     except Exception:
         return {"fit_amp": np.nan, "fit_cen": x0, "fit_width": np.nan, "fit_fwhm": np.nan, "fit_offset": np.nan}
 
+# ---- ASLS baseline robusta ----
+def asls_baseline(y, lam=1e5, p=0.01, niter=10):
+    y = np.asarray(y, dtype=float)
+    N = len(y)
+    if N < 5:
+        return np.zeros_like(y)
+    # criar D (N-2, N) com [1, -2, 1]
+    diag0 = np.ones(N-2)
+    diag1 = -2.0 * np.ones(N-2)
+    diag2 = np.ones(N-2)
+    D = sparse.diags([diag0, diag1, diag2], offsets=[0,1,2], shape=(N-2, N), format='csc')
+    w = np.ones(N)
+    for _ in range(niter):
+        W = sparse.diags(w, 0, shape=(N, N), format='csc')
+        Z = W + lam * (D.T.dot(D))
+        z = spsolve(Z, w * y)
+        w = p * (y > z) + (1 - p) * (y < z)
+    return z
 
-# ===============================
-#  Pipeline completo (compatível com app.py)
-# ===============================
-
+# ---- pipeline principal com plotting estilo "main + residual" ----
 def process_raman_pipeline(
     sample_input,
     substrate_input,
-    resample_points=3000,
-    sg_window=11,
-    sg_poly=3,
-    asls_lambda=1e5,
-    asls_p=0.01,
-    peak_prominence=0.02,
-    fit_profile="lorentz"
-):
-    """
-    Executa o processamento completo do espectro Raman:
-    - leitura e reamostragem
-    - subtração de substrato (auto-alpha)
-    - baseline (ASLS)
-    - suavização (SG)
-    - detecção e ajuste de picos
-    Retorna ((x, y_norm), peaks_df, figura matplotlib)
-    """
+    resample_points: int = 3000,
+    sg_window: int = 11,
+    sg_poly: int = 3,
+    asls_lambda: float = 1e5,
+    asls_p: float = 0.01,
+    peak_prominence: float = 0.02,
+    trim_frac: float = 0.02,
+    fit_profile: str = 'lorentz'
+) -> Tuple[Tuple[np.ndarray,np.ndarray], pd.DataFrame, plt.Figure]:
+    """Executa pipeline e gera figura com main + residual."""
 
-    import matplotlib.pyplot as plt
-
-    # --- Leitura
+    # leitura
     x_s, y_s = read_spectrum(sample_input)
     x_b, y_b = read_spectrum(substrate_input)
 
-    resample_points = int(resample_points)
-    if resample_points < 10:
-        raise ValueError("resample_points deve ser >= 10")
-
-    # --- Reamostragem
+    # resample robusto
+    resample_points = int(max(10, resample_points))
     x_min = max(min(x_s), min(x_b))
     x_max = min(max(x_s), max(x_b))
     if x_max <= x_min:
-        x_min, x_max = min(min(x_s), min(x_b)), max(max(x_s), max(x_b))
-
+        x_min = min(min(x_s), min(x_b)); x_max = max(max(x_s), max(x_b))
     x_common = np.linspace(x_min, x_max, resample_points)
     y_s_rs = np.interp(x_common, x_s, y_s)
     y_b_rs = np.interp(x_common, x_b, y_b)
 
-    # --- Subtração com alpha automático
-    denom = np.dot(y_b_rs, y_b_rs)
-    alpha = np.dot(y_s_rs, y_b_rs) / denom if denom > 0 else 0
-    y_sub = y_s_rs - alpha * y_b_rs
+    # trim central para fit alpha
+    n = x_common.size
+    i0 = int(np.floor(n * trim_frac))
+    i1 = int(np.ceil(n * (1.0 - trim_frac)))
+    i0 = max(i0, 0); i1 = min(i1, n)
+    if (i1 - i0) < max(10, n//20):
+        i0 = 0; i1 = n
+    ys_trim = y_s_rs[i0:i1]; yb_trim = y_b_rs[i0:i1]
+    mask = np.isfinite(ys_trim) & np.isfinite(yb_trim)
+    ys_f = ys_trim[mask]; yb_f = yb_trim[mask]
 
-    # --- Baseline ASLS
+    # regressão com intercepto para alpha, beta
+    alpha = 0.0; beta = 0.0
+    if len(yb_f) >= 5:
+        A = np.vstack([yb_f, np.ones_like(yb_f)]).T
+        sol, *_ = np.linalg.lstsq(A, ys_f, rcond=None)
+        alpha_raw, beta_raw = float(sol[0]), float(sol[1])
+        alpha = max(0.0, alpha_raw); beta = float(beta_raw)
+    # cap alpha
+    max_alpha = max(5.0, np.median(np.abs(ys_f)) / (np.median(np.abs(yb_f))+1e-12) * 5.0) if len(yb_f)>0 else 5.0
+    if alpha > max_alpha:
+        alpha = max_alpha
+
+    # aplicar subtracao (inclui beta)
+    y_sub = y_s_rs - alpha * y_b_rs - beta
+
+    # baseline ASLS
     baseline = asls_baseline(y_sub, lam=asls_lambda, p=asls_p, niter=12)
     y_corr = y_sub - baseline
 
-    # --- Suavização SG
+    # SG smoothing (ajustando janela)
     sg_window = int(sg_window)
     if sg_window % 2 == 0:
         sg_window += 1
     if sg_window >= len(y_corr):
-        sg_window = max(3, len(y_corr) - 1)
+        sg_window = max(3, len(y_corr)-1)
         if sg_window % 2 == 0:
             sg_window -= 1
     try:
@@ -169,52 +152,87 @@ def process_raman_pipeline(
     except Exception:
         y_smooth = y_corr
 
-    # --- Normalização
-    y_norm = y_smooth / np.max(np.abs(y_smooth))
+    # normalizacao (para detecção e visual)
+    denom = np.nanmax(np.abs(y_smooth))
+    norm = denom if denom != 0 else 1.0
+    y_norm = y_smooth / norm
+    baseline_norm = baseline / norm
+    y_s_rs_norm = y_s_rs / norm
 
-    # --- Detecção de picos
+    # detect peaks
     min_distance = max(3, int(resample_points / 200))
-    peaks_idx, props = find_peaks(y_norm, prominence=peak_prominence, distance=min_distance)
+    try:
+        peaks_idx, props = find_peaks(y_norm, prominence=peak_prominence, distance=min_distance)
+    except Exception:
+        peaks_idx = np.array([], dtype=int); props = {}
 
     peaks = []
     for idx in peaks_idx:
         cen = float(x_common[idx])
         inten = float(y_norm[idx])
-        prom = float(props["prominences"][np.where(peaks_idx == idx)][0]) if "prominences" in props else np.nan
-        peaks.append({"peak_cm1": cen, "intensity": inten, "prominence": prom, "index": int(idx)})
+        prom = float(props['prominences'][np.where(peaks_idx==idx)][0]) if 'prominences' in props else np.nan
+        peaks.append({'peak_cm1': cen, 'intensity': inten, 'prominence': prom, 'index': int(idx)})
     peaks_df = pd.DataFrame(peaks)
 
-    # --- Ajuste Lorentziano
+    # fit peaks
     fit_results = []
     for _, prow in peaks_df.iterrows():
-        x0 = float(prow["peak_cm1"])
-        res_fit = fit_lorentzian(x_common, y_norm, x0, window=(x_common.max() - x_common.min()) / 200.0 * 10.0)
-        fit_results.append(res_fit or {"fit_amp": np.nan, "fit_cen": x0, "fit_width": np.nan, "fit_fwhm": np.nan, "fit_offset": np.nan})
-
+        x0 = float(prow['peak_cm1'])
+        res_fit = fit_lorentzian(x_common, y_norm, x0, window=(x_common.max()-x_common.min())/100.0*4.0)
+        fit_results.append(res_fit or {'fit_amp': np.nan, 'fit_cen': x0, 'fit_width': np.nan, 'fit_fwhm': np.nan, 'fit_offset': np.nan})
     fit_df = pd.DataFrame(fit_results)
-    # --- Concatenação segura
-    peaks_df = peaks_df.reset_index(drop=True)
-    fit_df = fit_df.reset_index(drop=True)
+    peaks_df = peaks_df.reset_index(drop=True); fit_df = fit_df.reset_index(drop=True)
     if len(peaks_df) != len(fit_df):
         minlen = min(len(peaks_df), len(fit_df))
         peaks_df = peaks_df.iloc[:minlen].reset_index(drop=True)
         fit_df = fit_df.iloc[:minlen].reset_index(drop=True)
     peaks_df = pd.concat([peaks_df, fit_df], axis=1)
+    if 'fit_amp' in peaks_df.columns:
+        peaks_df['fit_amp_raw'] = peaks_df['fit_amp'] * norm
 
-    # --- Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-    axes[0].plot(x_common, y_s_rs, label="Sample", color="#333")
-    axes[0].plot(x_common, alpha * y_b_rs, "--", label=f"Substrate (α={alpha:.3f})", color="#999")
-    axes[0].legend()
-    axes[0].set_title("Antes: Amostra e Substrato")
-    axes[0].set_xlabel("Wavenumber (cm⁻¹)")
+    # build model: sum of peak lorentzians + baseline_norm
+    model_peaks = np.zeros_like(x_common, dtype=float)
+    cmap = plt.cm.get_cmap('tab20')
+    for i, row in peaks_df.iterrows():
+        try:
+            amp = float(row.get('fit_amp', 0.0))
+            cen = float(row.get('fit_cen', row.get('peak_cm1', np.nan)))
+            wid = float(row.get('fit_width', np.nan)) if not np.isnan(row.get('fit_width', np.nan)) else max(1.0, (x_common.max()-x_common.min())/200.0)
+            if np.isfinite(amp):
+                model_peaks += lorentz(x_common, amp, cen, wid, 0.0)
+        except Exception:
+            pass
+    model_total = baseline_norm + model_peaks
+    residual = y_norm - model_total
 
-    axes[1].plot(x_common, y_norm, label="Corrigido (norm.)", color="#1f77b4")
-    axes[1].plot(x_common, baseline / np.max(np.abs(y_corr)), "--", label="Baseline (esc.)", color="#ff7f0e")
-    axes[1].set_title("Depois: Baseline + Correção")
-    axes[1].set_xlabel("Wavenumber (cm⁻¹)")
-    axes[1].legend()
+    # ---- Plot: main + residual ----
+    fig = plt.figure(figsize=(12,8))
+    gs = fig.add_gridspec(3, 1, height_ratios=[6, 0.2, 1], hspace=0.18)
+    ax_main = fig.add_subplot(gs[0,0])
+    ax_res = fig.add_subplot(gs[2,0], sharex=ax_main)
+
+    ax_main.plot(x_common, y_s_rs_norm, '.', color='0.4', markersize=3, label='Dados')
+    ax_main.plot(x_common, model_total, '-', color='red', linewidth=2, label='Ajuste Total')
+    ax_main.plot(x_common, baseline_norm, '--', color='magenta', linewidth=2, label='Linha Base')
+
+    for i, row in peaks_df.iterrows():
+        cen = float(row.get('fit_cen', row.get('peak_cm1', np.nan)))
+        amp = float(row.get('fit_amp', np.nan)) if not np.isnan(row.get('fit_amp', np.nan)) else 0.0
+        wid = float(row.get('fit_width', np.nan)) if not np.isnan(row.get('fit_width', np.nan)) else 1.0
+        if amp != 0.0 and np.isfinite(cen):
+            ys = lorentz(x_common, amp, cen, wid, 0.0)
+            ax_main.plot(x_common, ys, linestyle='--', linewidth=1.2, label=f'Pico {i+1}', color=cmap(i % 20))
+
+    ax_main.set_ylabel('Intens. Norm.')
+    ax_main.set_title('Análise de Espectro Raman')
+    ax_main.grid(True, linestyle='--', alpha=0.4)
+    ax_main.legend(loc='center left', bbox_to_anchor=(1.02, 0.5))
+
+    ax_res.plot(x_common, residual, color='tab:blue', linewidth=1)
+    ax_res.axhline(0, color='k', linestyle='--', linewidth=1)
+    ax_res.set_ylabel('Residuo')
+    ax_res.set_xlabel('Wave (cm^-1)')
+    ax_res.grid(True, linestyle='--', alpha=0.4)
 
     plt.tight_layout()
-
     return (x_common, y_norm), peaks_df, fig
