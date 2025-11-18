@@ -263,59 +263,43 @@ with tab_pat:
 # ---------------------------
 # Aba 2: Espectrometria Raman (com batch upload até 10 arquivos)
 # ---------------------------
+
 with tab_raman:
     st.header("2️⃣ Espectrometria Raman — processamento e anotação")
+
     if process_raman_pipeline is None:
         st.error("Módulo raman_processing_v2.py não encontrado ou com erro. Coloque no mesmo diretório.")
+
+    # carregar pacientes cadastrados
     patients = get_patients_list(200) if supabase else []
-    patient_map = {f\"{p['id']} - {p['full_name']}\": p['id'] for p in patients} if patients else {}
+
+    # ❗❗ TRECHO CORRIGIDO AQUI — sem nenhum caractere escapado ❗❗
+    patient_map = {f"{p['id']} - {p['full_name']}": p["id"] for p in patients} if patients else {}
 
     st.subheader("Escolha paciente / amostra")
     col_pa, col_pb = st.columns([1, 2])
+
     with col_pa:
         if patient_map:
             sel_patient_label = st.selectbox("Paciente", list(patient_map.keys()))
             sel_patient_id = patient_map[sel_patient_label]
-            # listar amostras do paciente
-            patient_samples = get_samples_for_patient(sel_patient_id) if supabase else []
-            samp_map = {f\"{s['id']} - {s['sample_name']}\": s['id'] for s in patient_samples} if patient_samples else {}
+
+            # buscar amostras do paciente
+            if supabase:
+                samp_res = supabase.table("samples").select("*").eq("patient_id", sel_patient_id).order("created_at", desc=True).execute()
+                patient_samples = samp_res.data or []
+            else:
+                patient_samples = []
+
+            samp_map = {f"{s['id']} - {s['sample_name']}": s["id"] for s in patient_samples} if patient_samples else {}
+
             sel_sample_label = st.selectbox("Amostra (opcional, para salvar)", [""] + list(samp_map.keys()))
             sel_sample_id = samp_map[sel_sample_label] if sel_sample_label else None
+
         else:
             st.info("Nenhum paciente encontrado — importe formulário ou cadastre um paciente.")
             sel_patient_id = None
             sel_sample_id = None
-
-    with col_pb:
-        st.subheader("Upload do espectro / substrato")
-        st.markdown("Você pode enviar **até 10 espectros** de uma só vez (cada arquivo será processado individualmente usando o substrato carregado).")
-        uploaded_sample_single = st.file_uploader("Espectro da amostra (individual) - txt/csv", type=["txt","csv"], key="up_single")
-        uploaded_substrate = st.file_uploader("Espectro do substrato / branco (obrigatório para processar lote)", type=["txt","csv"], key="up_substrate")
-        st.markdown("OU")
-        batch_files = st.file_uploader("Upload em lote (até 10 arquivos) — selecione múltiplos", type=["txt","csv"], accept_multiple_files=True, key="batch_up")
-
-    st.markdown("---")
-    st.subheader("Parâmetros do pipeline")
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        resample_points = st.number_input("Pontos reamostragem", value=3000, min_value=200, max_value=10000, step=100)
-        sg_window = st.number_input("SG window (ímpar)", value=21, min_value=3, step=2)
-    with c2:
-        sg_poly = st.number_input("SG polyorder", value=2, min_value=1, max_value=5)
-        asls_lambda = st.number_input("ASLS lambda", value=1e5, format="%.0f")
-    with c3:
-        asls_p = st.number_input("ASLS p", value=0.01, format="%.4f")
-        prominence = st.number_input("Prominence (picos)", value=0.02, format="%.4f")
-
-    # helper to parse uploaded into StringIO
-    def buf_from_file(f):
-        try:
-            return io.StringIO(f.getvalue().decode("utf-8"))
-        except Exception:
-            try:
-                return io.StringIO(f.getvalue().decode("latin-1"))
-            except Exception:
-                return None
 
     # -----------------
     # Processar arquivo único (interface antiga)
