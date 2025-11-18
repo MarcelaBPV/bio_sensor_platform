@@ -1,8 +1,27 @@
+# File: raman_processing.py
 # -*- coding: utf-8 -*-
 """
-raman_processing.py
-Versão com _apply_smoothing integrada.
+Pipeline Raman adaptado para integrar com o app.py fornecido.
+Assinatura principal:
+    process_raman_pipeline(sample_input, substrate_input, resample_points=3000,
+                           sg_window=11, sg_poly=3, asls_lambda=1e5, asls_p=0.01,
+                           peak_prominence=0.02, trim_frac=0.02)
+Retorna: ((x_common, y_norm), peaks_df, fig)
+
+peaks_df contém colunas:
+  - peak_cm1: posição do pico detectado (cm^-1)
+  - intensity: intensidade normalizada do pico (y_norm no índice do pico)
+  - prominence: proeminência do pico (find_peaks)
+  - index: índice no vetor x_common
+  - fit_amp, fit_cen, fit_width, fit_fwhm, fit_offset: parâmetros do ajuste Lorentz
+  - fit_amp_raw: amplitude do ajuste em unidades originais (antes da normalização)
+  - fit_height: valor do modelo Lorentz no centro (normalizado)
+
+Notas:
+- Aceita file-like (BytesIO) com csv/txt com duas colunas numéricas (wavenumber, intensity).
+- Se substrate_input for None, considera substrato como zero.
 """
+
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter, find_peaks
@@ -21,67 +40,20 @@ except Exception:
             print("warning:", args, kwargs)
     messagebox = _DummyMsg()
 
-# ---- sua função de suavização ----
-def _apply_smoothing(self_or_none, y_data, window, order):
-    """Aplica a suavização Savitzky-Golay (baseado no código existente).
+# ---------------------------
+# Helpers: IO, lorentz, ASLS
+# ---------------------------
 
-    Nota: mantive a assinatura para aceitar um 'self' caso queira integrar como método.
-    Se usar como função standalone, passe None no primeiro argumento.
-    """
-    try:
-        # se for chamado como método, o primeiro argumento pode ser 'self'
-        # então detectamos e realinhamos parâmetros quando necessário
-        if y_data is None and window is None and order is None:
-            # caso chamem erradamente, retorna sem mudanças
-            return y_data
-
-        win = int(window)
-        if win % 2 == 0:
-            win += 1
-        poly = int(order)
-
-        # Verifica se a janela é válida
-        if win < 3:  # Janela mínima para SavGol é 3
-            print(f"Aviso: Janela SavGol ({win}) inválida (<3). Suavização não aplicada.")
-            return y_data
-        if win >= len(y_data):
-            # ajusta para o maior ímpar menor que len(y_data)
-            if len(y_data) % 2 == 0:
-                win = len(y_data) - 1
-            else:
-                win = len(y_data) - 2
-            if win < 3:
-                print(f"Aviso: Janela SavGol ajustada ({win}) inválida (<3). Suavização não aplicada.")
-                return y_data
-        if win <= poly:
-            print(f"Aviso: Janela SavGol ({win}) <= Ordem ({poly}). Suavização não aplicada.")
-            return y_data
-
-        # espera um pd.Series (para preservar index), mas aceita array-like
-        if isinstance(y_data, pd.Series):
-            arr = y_data.values
-            idx = y_data.index
-            sm = savgol_filter(arr, window_length=win, polyorder=poly)
-            return pd.Series(sm, index=idx)
-        else:
-            # se não for Series, aplica diretamente e retorna mesmo tipo (np.array)
-            return pd.Series(savgol_filter(np.asarray(y_data), window_length=win, polyorder=poly))
-    except Exception as e:
-        print(f"Erro ao aplicar suavização: {e}")
-        try:
-            messagebox.showwarning("Erro de Suavização", f"Não foi possível aplicar a suavização.\nVerifique Janela/Ordem.\n{e}")
-        except Exception:
-            # já logamos acima — evitar crash em ambiente sem GUI
-            pass
-        return y_data
-
-# ---- IO helper (flexível) ----
 def read_spectrum(file_like):
     """Lê espectro de arquivo-like (csv/txt). Retorna x, y ordenados."""
     try:
+        # tenta ler como CSV com separador autodetect
         df = pd.read_csv(file_like, sep=None, engine='python', comment='#', header=None)
     except Exception:
-        file_like.seek(0)
+        try:
+            file_like.seek(0)
+        except Exception:
+            pass
         df = pd.read_csv(file_like, delim_whitespace=True, header=None)
     df = df.select_dtypes(include=[np.number])
     if df.shape[1] < 2:
@@ -91,18 +63,19 @@ def read_spectrum(file_like):
     order = np.argsort(x)
     return x[order], y[order]
 
-# ---- Lorentzian ----
+
 def lorentz(x, amp, cen, wid, offset):
-    return amp * ( (0.5*wid)**2 / ( (x-cen)**2 + (0.5*wid)**2 ) ) + offset
+    return amp * ((0.5*wid)**2 / ((x-cen)**2 + (0.5*wid)**2)) + offset
+
 
 def fit_lorentzian(x, y, x0, window=20.0):
     mask = (x >= x0 - window/2) & (x <= x0 + window/2)
     if mask.sum() < 5:
         return None
     xs = x[mask]; ys = y[mask]
-    amp0 = max(np.nanmax(ys)-np.nanmin(ys), 1e-6)
-    off0 = np.nanmin(ys)
-    wid0 = max((xs.max()-xs.min())/6.0, 1.0)
+    amp0 = float(max(np.nanmax(ys)-np.nanmin(ys), 1e-6))
+    off0 = float(np.nanmin(ys))
+    wid0 = float(max((xs.max()-xs.min())/6.0, 1.0))
     p0 = [amp0, x0, wid0, off0]
     try:
         popt, _ = curve_fit(
@@ -113,9 +86,10 @@ def fit_lorentzian(x, y, x0, window=20.0):
         amp, cen, wid, off = popt
         return {"fit_amp": float(amp), "fit_cen": float(cen), "fit_width": float(wid), "fit_fwhm": float(2*wid), "fit_offset": float(off)}
     except Exception:
-        return {"fit_amp": np.nan, "fit_cen": x0, "fit_width": np.nan, "fit_fwhm": np.nan, "fit_offset": np.nan}
+        # retorna com cen = x0 para manter consistência
+        return {"fit_amp": np.nan, "fit_cen": float(x0), "fit_width": np.nan, "fit_fwhm": np.nan, "fit_offset": np.nan}
 
-# ---- ASLS baseline robusta ----
+
 def asls_baseline(y, lam=1e5, p=0.01, niter=10):
     y = np.asarray(y, dtype=float)
     N = len(y)
@@ -133,7 +107,39 @@ def asls_baseline(y, lam=1e5, p=0.01, niter=10):
         w = p * (y > z) + (1 - p) * (y < z)
     return z
 
-# ---- pipeline principal com plotting estilo "main + residual" ----
+# ---------------------------
+# Savitzky-Golay wrapper (robusta)
+# ---------------------------
+
+def _apply_smoothing(y_data, window, order):
+    """Aplica Savitzky-Golay e retorna pd.Series com mesmo index se entrada for Series."""
+    try:
+        win = int(window)
+        if win % 2 == 0:
+            win += 1
+        poly = int(order)
+        if isinstance(y_data, pd.Series):
+            arr = y_data.values
+            idx = y_data.index
+        else:
+            arr = np.asarray(y_data)
+            idx = None
+        if win < 3 or win <= poly or win >= arr.size:
+            return pd.Series(arr, index=idx) if idx is not None else arr
+        sm = savgol_filter(arr, window_length=win, polyorder=poly)
+        return pd.Series(sm, index=idx) if idx is not None else sm
+    except Exception as e:
+        print('Erro em _apply_smoothing:', e)
+        try:
+            messagebox.showwarning('Erro de Suavização', f'Não foi possível aplicar SavGol:\n{e}')
+        except Exception:
+            pass
+        return y_data
+
+# ---------------------------
+# Pipeline principal
+# ---------------------------
+
 def process_raman_pipeline(
     sample_input,
     substrate_input,
@@ -146,13 +152,16 @@ def process_raman_pipeline(
     trim_frac: float = 0.02,
     fit_profile: str = 'lorentz'
 ) -> Tuple[Tuple[np.ndarray,np.ndarray], pd.DataFrame, plt.Figure]:
-    """Executa pipeline e gera figura com main + residual."""
+    """Executa pipeline e retorna (x_common, y_norm), peaks_df, fig."""
 
     # leitura
     x_s, y_s = read_spectrum(sample_input)
-    x_b, y_b = read_spectrum(substrate_input)
+    if substrate_input is not None:
+        x_b, y_b = read_spectrum(substrate_input)
+    else:
+        x_b, y_b = x_s, np.zeros_like(y_s)
 
-    # resample robusto
+    # resample
     resample_points = int(max(10, resample_points))
     x_min = max(min(x_s), min(x_b))
     x_max = min(max(x_s), max(x_b))
@@ -162,7 +171,7 @@ def process_raman_pipeline(
     y_s_rs = np.interp(x_common, x_s, y_s)
     y_b_rs = np.interp(x_common, x_b, y_b)
 
-    # trim central para fit alpha
+    # trim central para alpha
     n = x_common.size
     i0 = int(np.floor(n * trim_frac))
     i1 = int(np.ceil(n * (1.0 - trim_frac)))
@@ -173,26 +182,25 @@ def process_raman_pipeline(
     mask = np.isfinite(ys_trim) & np.isfinite(yb_trim)
     ys_f = ys_trim[mask]; yb_f = yb_trim[mask]
 
-    # regressão com intercepto para alpha, beta
+    # regressao com intercepto
     alpha = 0.0; beta = 0.0
     if len(yb_f) >= 5:
         A = np.vstack([yb_f, np.ones_like(yb_f)]).T
         sol, *_ = np.linalg.lstsq(A, ys_f, rcond=None)
         alpha_raw, beta_raw = float(sol[0]), float(sol[1])
         alpha = max(0.0, alpha_raw); beta = float(beta_raw)
-    # cap alpha
     max_alpha = max(5.0, np.median(np.abs(ys_f)) / (np.median(np.abs(yb_f))+1e-12) * 5.0) if len(yb_f)>0 else 5.0
     if alpha > max_alpha:
         alpha = max_alpha
 
-    # aplicar subtracao (inclui beta)
+    # subtracao
     y_sub = y_s_rs - alpha * y_b_rs - beta
 
     # baseline ASLS
     baseline = asls_baseline(y_sub, lam=asls_lambda, p=asls_p, niter=12)
     y_corr = y_sub - baseline
 
-    # SG smoothing (AJUSTADO para usar _apply_smoothing)
+    # suavizacao
     sg_window = int(sg_window)
     if sg_window % 2 == 0:
         sg_window += 1
@@ -200,26 +208,21 @@ def process_raman_pipeline(
         sg_window = max(3, len(y_corr)-1)
         if sg_window % 2 == 0:
             sg_window -= 1
-
-    # converte para pd.Series com índice x_common para preservar index no retorno
     y_corr_series = pd.Series(y_corr, index=x_common)
-    # chamando sua função: primeiro argumento pode ser None (não usado)
-    y_smooth_series = _apply_smoothing(None, y_corr_series, sg_window, sg_poly)
-    # garantir numpy array para as etapas seguintes
+    y_smooth_series = _apply_smoothing(y_corr_series, sg_window, sg_poly)
     try:
         y_smooth = np.asarray(y_smooth_series.values if isinstance(y_smooth_series, pd.Series) else y_smooth_series, dtype=float)
     except Exception:
-        # fallback: se algo falhar, usa y_corr bruto
         y_smooth = np.asarray(y_corr, dtype=float)
 
-    # normalizacao (para detecção e visual)
+    # normalizacao
     denom = np.nanmax(np.abs(y_smooth))
     norm = denom if denom != 0 else 1.0
     y_norm = y_smooth / norm
     baseline_norm = baseline / norm
     y_s_rs_norm = y_s_rs / norm
 
-    # detect peaks
+    # detecção de picos
     min_distance = max(3, int(resample_points / 200))
     try:
         peaks_idx, props = find_peaks(y_norm, prominence=peak_prominence, distance=min_distance)
@@ -234,25 +237,39 @@ def process_raman_pipeline(
         peaks.append({'peak_cm1': cen, 'intensity': inten, 'prominence': prom, 'index': int(idx)})
     peaks_df = pd.DataFrame(peaks)
 
-    # fit peaks
+    # ajuste lorentziano por pico
     fit_results = []
     for _, prow in peaks_df.iterrows():
         x0 = float(prow['peak_cm1'])
         res_fit = fit_lorentzian(x_common, y_norm, x0, window=(x_common.max()-x_common.min())/100.0*4.0)
         fit_results.append(res_fit or {'fit_amp': np.nan, 'fit_cen': x0, 'fit_width': np.nan, 'fit_fwhm': np.nan, 'fit_offset': np.nan})
     fit_df = pd.DataFrame(fit_results)
-    peaks_df = peaks_df.reset_index(drop=True); fit_df = fit_df.reset_index(drop=True)
+
+    # sincroniza e concatena
+    peaks_df = peaks_df.reset_index(drop=True)
+    fit_df = fit_df.reset_index(drop=True)
     if len(peaks_df) != len(fit_df):
         minlen = min(len(peaks_df), len(fit_df))
         peaks_df = peaks_df.iloc[:minlen].reset_index(drop=True)
         fit_df = fit_df.iloc[:minlen].reset_index(drop=True)
     peaks_df = pd.concat([peaks_df, fit_df], axis=1)
+
+    # calcula fit_height e fit_amp_raw
     if 'fit_amp' in peaks_df.columns:
         peaks_df['fit_amp_raw'] = peaks_df['fit_amp'] * norm
+        # fit_height: altura do modelo lorentz normalizado no centro
+        def _calc_fit_height(row):
+            try:
+                if np.isfinite(row.get('fit_amp', np.nan)) and np.isfinite(row.get('fit_width', np.nan)) and np.isfinite(row.get('fit_cen', np.nan)):
+                    return lorentz(np.array([row['fit_cen']]), row['fit_amp'], row['fit_cen'], row['fit_width'], row.get('fit_offset', 0.0))[0]
+                else:
+                    return np.nan
+            except Exception:
+                return np.nan
+        peaks_df['fit_height'] = peaks_df.apply(_calc_fit_height, axis=1)
 
-    # build model: sum of peak lorentzians + baseline_norm
+    # build model total para plot (baseline_norm + sum lorentz)
     model_peaks = np.zeros_like(x_common, dtype=float)
-    cmap = plt.cm.get_cmap('tab20')
     for i, row in peaks_df.iterrows():
         try:
             amp = float(row.get('fit_amp', 0.0))
@@ -265,7 +282,7 @@ def process_raman_pipeline(
     model_total = baseline_norm + model_peaks
     residual = y_norm - model_total
 
-    # ---- Plot: main + residual ----
+    # ---- Plot: main + residual (estética simplificada) ----
     fig = plt.figure(figsize=(12,8))
     gs = fig.add_gridspec(3, 1, height_ratios=[6, 0.2, 1], hspace=0.18)
     ax_main = fig.add_subplot(gs[0,0])
@@ -275,6 +292,7 @@ def process_raman_pipeline(
     ax_main.plot(x_common, model_total, '-', color='red', linewidth=2, label='Ajuste Total')
     ax_main.plot(x_common, baseline_norm, '--', color='magenta', linewidth=2, label='Linha Base')
 
+    cmap = plt.cm.get_cmap('tab20')
     for i, row in peaks_df.iterrows():
         cen = float(row.get('fit_cen', row.get('peak_cm1', np.nan)))
         amp = float(row.get('fit_amp', np.nan)) if not np.isnan(row.get('fit_amp', np.nan)) else 0.0
@@ -295,4 +313,5 @@ def process_raman_pipeline(
     ax_res.grid(True, linestyle='--', alpha=0.4)
 
     plt.tight_layout()
+
     return (x_common, y_norm), peaks_df, fig
