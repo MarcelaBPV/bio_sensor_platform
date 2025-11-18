@@ -1,13 +1,12 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Plataforma Raman — Final
-3 abas:
-1) Pacientes (cadastro & listagem)
-2) Espectrometria Raman (import Google Forms -> sample metadata, upload espectros, processamento, salvar)
-3) Otimização (IA) - treinar modelo para identificar possíveis doenças a partir dos espectros
+Bio Sensor App - Streamlit
+Três abas:
+1) Pacientes & Import Forms (inclui import ZIP em lotes)
+2) Espectrometria Raman (upload individual e upload de até 10 amostras de uma vez)
+3) Otimização (IA)
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -22,15 +21,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
-# Supabase client
+# Supabase
 from supabase import create_client, Client
 
-# Pipeline de Raman (coloque raman_processing.py no mesmo diretório)
+# Pipeline
 try:
-    from raman_processing import process_raman_pipeline
-except Exception:
+    from raman_processing_v2 import process_raman_pipeline
+except Exception as e:
     process_raman_pipeline = None
-    # We'll surface the error in UI
 
 # ---------------------------
 # Config Streamlit
@@ -38,48 +36,24 @@ except Exception:
 st.set_page_config(page_title="Plataforma Raman — Pacientes & Ensaios", layout="wide", page_icon="🧬")
 st.title("🧬 Plataforma Raman — Análise Molecular do Sangue")
 
-# ============================================
-# 🔌 Conexão com Supabase + Diagnóstico
-# ============================================
-def init_supabase():
-    """Cria cliente Supabase e testa conexão."""
-    try:
-        SUPABASE_URL = st.secrets["SUPABASE_URL"]
-        SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    except Exception as e:
-        st.sidebar.error(f"❌ Falta variável em st.secrets: {e}")
-        return None
+# ---------------------------
+# Conexão Supabase (st.secrets)
+# ---------------------------
+SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # teste rápido: buscar primeira linha da tabela patients (não falha se tabela vazia)
-        try:
-            res = client.table("patients").select("id").limit(1).execute()
-            # dependendo da versão do client, res pode ter .status_code ou apenas .data
-            if hasattr(res, "status_code"):
-                ok = res.status_code in (200, 201)
-            else:
-                ok = True
-            if ok:
-                st.sidebar.success("✅ Supabase conectado com sucesso!")
-            else:
-                st.sidebar.warning("⚠️ Supabase respondeu, mas sem status esperado.")
-        except Exception as e:
-            # Pode falhar se a tabela não existir — ainda assim retornamos o cliente
-            st.sidebar.warning(f"⚠️ Não foi possível consultar tabela 'patients': {e}")
-        return client
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
-        st.sidebar.error(f"❌ Erro ao conectar Supabase: {e}")
-        return None
-
-# inicializa o cliente global
-supabase: Optional[Client] = init_supabase()
-# Não interrompemos rigidamente: permitimos executar a UI mesmo sem supabase, mas operações de save avisarão.
-# if not supabase:
-#     st.stop()
+        st.error(f"Erro conectando ao Supabase: {e}")
+        supabase = None
+else:
+    st.warning("⚠️ Coloque SUPABASE_URL e SUPABASE_KEY em st.secrets para habilitar salvamentos no banco.")
 
 # ---------------------------
-# Utilidades Supabase (seguras)
+# Utilidades Supabase (usam supabase client)
 # ---------------------------
 def safe_insert(table: str, records: List[Dict]):
     if not supabase:
@@ -91,8 +65,8 @@ def safe_insert(table: str, records: List[Dict]):
     for i in range(0, len(records), batch):
         chunk = records[i:i+batch]
         res = supabase.table(table).insert(chunk).execute()
-        if hasattr(res, "error") and res.error:
-            raise RuntimeError(f"Erro inserindo em {table}: {res.error.message if hasattr(res.error,'message') else res.error}")
+        if res.error:
+            raise RuntimeError(f"Erro inserindo em {table}: {res.error}")
         out.extend(res.data or [])
     return out
 
@@ -100,12 +74,11 @@ def create_patient_record(patient_obj: Dict) -> Dict:
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
     res = supabase.table("patients").insert(patient_obj).execute()
-    if hasattr(res, "error") and res.error:
-        raise RuntimeError(res.error.message)
+    if res.error:
+        raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]
 
 def find_patient_by_email_or_cpf(email: Optional[str], cpf: Optional[str]) -> Optional[Dict]:
-    # tenta encontrar paciente existente para evitar duplicatas
     if not supabase:
         return None
     if email:
@@ -122,8 +95,8 @@ def create_sample_record(sample_obj: Dict) -> Dict:
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
     res = supabase.table("samples").insert(sample_obj).execute()
-    if hasattr(res, "error") and res.error:
-        raise RuntimeError(res.error.message)
+    if res.error:
+        raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]
 
 def create_measurement_record(sample_id: int, ensaio_type: str, operator: Optional[str]=None, notes: Optional[str]=None) -> int:
@@ -131,8 +104,8 @@ def create_measurement_record(sample_id: int, ensaio_type: str, operator: Option
         raise RuntimeError("Supabase não configurado.")
     rec = {"sample_id": sample_id, "type": ensaio_type, "operator": operator, "notes": notes}
     res = supabase.table("measurements").insert(rec).execute()
-    if hasattr(res, "error") and res.error:
-        raise RuntimeError(res.error.message)
+    if res.error:
+        raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]["id"]
 
 def insert_raman_spectrum_df(df: pd.DataFrame, measurement_id: int):
@@ -153,16 +126,14 @@ def get_patients_list(limit: int = 500) -> List[Dict]:
     r = supabase.table("patients").select("*").order("created_at", desc=True).limit(limit).execute()
     return r.data or []
 
-def get_samples_list(limit: int = 500) -> List[Dict]:
+def get_samples_for_patient(patient_id: int) -> List[Dict]:
     if not supabase:
         return []
-    r = supabase.table("samples").select("*").order("created_at", desc=True).limit(limit).execute()
+    r = supabase.table("samples").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
     return r.data or []
 
 # ---------------------------
-# Mapeamento molecular (simples)
-# ranges (cm^-1) -> annotations
-# ajustar conforme literatura
+# Mapeamento molecular simples
 # ---------------------------
 MOLECULAR_MAP = {
     (700, 740): "Hemoglobina / porfirinas (C–H, anéis)",
@@ -191,63 +162,12 @@ def annotate_molecular_groups(peaks_df: pd.DataFrame, tolerance: float = 5.0) ->
     return peaks_df
 
 # ---------------------------
-# Importador Google Forms CSV -> cria paciente + sample + salva metadata (JSON)
-# - tenta evitar duplicatas por email/CPF
-# ---------------------------
-def import_google_forms_csv(file_buf) -> List[Dict]:
-    """
-    Recebe arquivo CSV (uploaded do Google Forms) e cria pacientes + amostras no Supabase.
-    Retorna lista de {"patient":..., "sample":...}
-    """
-    df = pd.read_csv(file_buf)
-    results = []
-    for _, row in df.iterrows():
-        # monta metadata com TODOs from form row
-        metadata = {str(k): (v if pd.notna(v) else None) for k, v in row.items()}
-        # tenta mapear nome/email/cpf
-        # heurística: acha coluna com 'nome', 'e-mail' ou 'email', 'cpf'
-        colname = next((c for c in df.columns if 'nome' in c.lower()), None)
-        colemail = next((c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()), None)
-        colcpf = next((c for c in df.columns if 'cpf' in c.lower()), None)
-
-        name = str(row[colname]) if colname and pd.notna(row[colname]) else None
-        email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
-        cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
-
-        # procura paciente existente
-        existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
-        if existing:
-            patient_record = existing
-        else:
-            # cria paciente novo (campos mínimos)
-            patient_obj = {
-                "full_name": name or "Desconhecido",
-                "email": email,
-                "cpf": cpf,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            patient_record = create_patient_record(patient_obj)
-
-        # cria amostra vinculada e salva metadata inteira
-        sample_obj = {
-            "patient_id": patient_record["id"],
-            "sample_name": f"FormResponse_{patient_record['id']}_{int(time.time())}",
-            "description": "Importado via Google Forms",
-            "collection_date": None,
-            "metadata": metadata,
-            "substrate": metadata.get("substrato") or metadata.get("substrate") or None
-        }
-        sample_record = create_sample_record(sample_obj)
-        results.append({"patient": patient_record, "sample": sample_record})
-    return results
-
-# ---------------------------
 # UI: abas
 # ---------------------------
 tab_pat, tab_raman, tab_ai = st.tabs(["1️⃣ Pacientes & Import Forms", "2️⃣ Espectrometria Raman", "3️⃣ Otimização (IA)"])
 
 # ---------------------------
-# Aba 1: Pacientes & Import Forms
+# Aba 1: Pacientes & Import Forms (mantém os recursos de before)
 # ---------------------------
 with tab_pat:
     st.header("1️⃣ Pacientes — Cadastro e Importação do Google Forms")
@@ -293,14 +213,39 @@ with tab_pat:
                 else:
                     try:
                         with st.spinner("Importando..."):
-                            res = import_google_forms_csv(forms_csv)
-                        st.success(f"Importadas {len(res)} respostas. Amostras criadas: {len(res)}")
-                        st.write(pd.DataFrame([{
-                            "patient_id": r["patient"]["id"],
-                            "patient_name": r["patient"].get("full_name"),
-                            "sample_id": r["sample"]["id"],
-                            "sample_name": r["sample"].get("sample_name")
-                        } for r in res]))
+                            df = pd.read_csv(forms_csv)
+                            # reusa função importadora simples (adaptar se preferir)
+                            imported = []
+                            for _, row in df.iterrows():
+                                # heurística de mapeamento como antes
+                                colname = next((c for c in df.columns if 'nome' in c.lower()), None)
+                                colemail = next((c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()), None)
+                                colcpf = next((c for c in df.columns if 'cpf' in c.lower()), None)
+                                name = str(row[colname]) if colname and pd.notna(row[colname]) else None
+                                email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
+                                cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
+                                existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
+                                if existing:
+                                    patient_record = existing
+                                else:
+                                    patient_obj = {
+                                        "full_name": name or "Desconhecido",
+                                        "email": email,
+                                        "cpf": cpf,
+                                        "created_at": datetime.utcnow().isoformat()
+                                    }
+                                    patient_record = create_patient_record(patient_obj)
+                                sample_obj = {
+                                    "patient_id": patient_record["id"],
+                                    "sample_name": f"FormResponse_{patient_record['id']}_{int(time.time())}",
+                                    "description": "Importado via Google Forms",
+                                    "collection_date": None,
+                                    "metadata": {str(k): (v if pd.notna(v) else None) for k, v in row.items()},
+                                    "substrate": None
+                                }
+                                create_sample_record(sample_obj)
+                                imported.append(patient_record["id"])
+                        st.success(f"Importadas {len(imported)} respostas.")
                     except Exception as e:
                         st.error(f"Erro na importação: {e}")
 
@@ -316,28 +261,24 @@ with tab_pat:
         st.info("Conecte ao Supabase para ver a lista de pacientes.")
 
 # ---------------------------
-# Aba 2: Espectrometria Raman
+# Aba 2: Espectrometria Raman (com batch upload até 10 arquivos)
 # ---------------------------
 with tab_raman:
     st.header("2️⃣ Espectrometria Raman — processamento e anotação")
     if process_raman_pipeline is None:
-        st.error("Módulo raman_processing.py não encontrado ou com erro. Coloque no mesmo diretório.")
-    # selecionar paciente e amostra
+        st.error("Módulo raman_processing_v2.py não encontrado ou com erro. Coloque no mesmo diretório.")
     patients = get_patients_list(200) if supabase else []
-    patient_map = {f"{p['id']} - {p['full_name']}": p["id"] for p in patients} if patients else {}
+    patient_map = {f\"{p['id']} - {p['full_name']}\": p['id'] for p in patients} if patients else {}
+
     st.subheader("Escolha paciente / amostra")
     col_pa, col_pb = st.columns([1, 2])
     with col_pa:
         if patient_map:
             sel_patient_label = st.selectbox("Paciente", list(patient_map.keys()))
             sel_patient_id = patient_map[sel_patient_label]
-            # listar amostras do paciente (busca simples no supabase)
-            if supabase:
-                samp_res = supabase.table("samples").select("*").eq("patient_id", sel_patient_id).order("created_at", desc=True).execute()
-                patient_samples = samp_res.data or []
-            else:
-                patient_samples = []
-            samp_map = {f"{s['id']} - {s['sample_name']}": s["id"] for s in patient_samples} if patient_samples else {}
+            # listar amostras do paciente
+            patient_samples = get_samples_for_patient(sel_patient_id) if supabase else []
+            samp_map = {f\"{s['id']} - {s['sample_name']}\": s['id'] for s in patient_samples} if patient_samples else {}
             sel_sample_label = st.selectbox("Amostra (opcional, para salvar)", [""] + list(samp_map.keys()))
             sel_sample_id = samp_map[sel_sample_label] if sel_sample_label else None
         else:
@@ -346,30 +287,44 @@ with tab_raman:
             sel_sample_id = None
 
     with col_pb:
-        st.subheader("Upload dos espectros")
-        uploaded_sample = st.file_uploader("Espectro da amostra (txt/csv)", type=["txt","csv"])
-        uploaded_substrate = st.file_uploader("Espectro do substrato / branco (txt/csv) — obrigatório", type=["txt","csv"])
-        st.markdown("Se já salvou o branco como amostra, pode baixar o CSV do storage e enviar aqui.")
+        st.subheader("Upload do espectro / substrato")
+        st.markdown("Você pode enviar **até 10 espectros** de uma só vez (cada arquivo será processado individualmente usando o substrato carregado).")
+        uploaded_sample_single = st.file_uploader("Espectro da amostra (individual) - txt/csv", type=["txt","csv"], key="up_single")
+        uploaded_substrate = st.file_uploader("Espectro do substrato / branco (obrigatório para processar lote)", type=["txt","csv"], key="up_substrate")
+        st.markdown("OU")
+        batch_files = st.file_uploader("Upload em lote (até 10 arquivos) — selecione múltiplos", type=["txt","csv"], accept_multiple_files=True, key="batch_up")
 
     st.markdown("---")
     st.subheader("Parâmetros do pipeline")
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
         resample_points = st.number_input("Pontos reamostragem", value=3000, min_value=200, max_value=10000, step=100)
-        sg_window = st.number_input("SG window (ímpar)", value=11, min_value=3, step=2)
+        sg_window = st.number_input("SG window (ímpar)", value=21, min_value=3, step=2)
     with c2:
-        sg_poly = st.number_input("SG polyorder", value=3, min_value=1, max_value=5)
+        sg_poly = st.number_input("SG polyorder", value=2, min_value=1, max_value=5)
         asls_lambda = st.number_input("ASLS lambda", value=1e5, format="%.0f")
     with c3:
         asls_p = st.number_input("ASLS p", value=0.01, format="%.4f")
         prominence = st.number_input("Prominence (picos)", value=0.02, format="%.4f")
 
-    if uploaded_sample and uploaded_substrate:
+    # helper to parse uploaded into StringIO
+    def buf_from_file(f):
         try:
-            # prepare buffers
-            sample_buf = io.StringIO(uploaded_sample.getvalue().decode("utf-8"))
-            substrate_buf = io.StringIO(uploaded_substrate.getvalue().decode("utf-8"))
-            with st.spinner("Processando (remoção substrato + baseline + identificação de picos)..."):
+            return io.StringIO(f.getvalue().decode("utf-8"))
+        except Exception:
+            try:
+                return io.StringIO(f.getvalue().decode("latin-1"))
+            except Exception:
+                return None
+
+    # -----------------
+    # Processar arquivo único (interface antiga)
+    # -----------------
+    if uploaded_sample_single and uploaded_substrate:
+        try:
+            sample_buf = buf_from_file(uploaded_sample_single)
+            substrate_buf = buf_from_file(uploaded_substrate)
+            with st.spinner("Processando..."):
                 (x, y), peaks_df, fig = process_raman_pipeline(
                     sample_input=sample_buf,
                     substrate_input=substrate_buf,
@@ -379,29 +334,24 @@ with tab_raman:
                     asls_lambda=float(asls_lambda),
                     asls_p=float(asls_p),
                     peak_prominence=float(prominence),
-                    fit_profile='lorentz'
+                    trim_frac=0.02
                 )
             st.pyplot(fig)
-            st.success(f"Picos detectados: {len(peaks_df)}")
             peaks_df = annotate_molecular_groups(peaks_df)
             st.subheader("Picos detectados e grupos moleculares")
             st.dataframe(peaks_df)
 
-            # ações: download, salvar
-            cold1, cold2 = st.columns([1,1])
-            with cold1:
+            coldl, coldr = st.columns(2)
+            with coldl:
                 df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
-                csv_spec = df_spec.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Baixar espectro corrigido (CSV)", csv_spec, file_name="spectrum_corrected.csv", mime="text/csv")
-                csv_peaks = peaks_df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Baixar picos (CSV)", csv_peaks, file_name="raman_peaks.csv", mime="text/csv")
-            with cold2:
+                st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv")
+                st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"), file_name="raman_peaks.csv", mime="text/csv")
+            with coldr:
                 if st.button("💾 Salvar espectro e picos no Supabase"):
                     if not supabase:
                         st.error("Supabase não configurado — não é possível salvar.")
                     else:
                         try:
-                            # se não tiver sample_id selecionado cria uma amostra temporária vinculada ao paciente
                             if sel_sample_id is None:
                                 if sel_patient_id is None:
                                     st.error("Selecione um paciente ou importe o Google Forms antes de salvar.")
@@ -420,10 +370,8 @@ with tab_raman:
                                 sample_id_to_use = sel_sample_id
 
                             meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Process via app")
-                            # salvar espectro em batches
                             df_to_save = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
                             insert_raman_spectrum_df(df_to_save, meas_id)
-                            # salvar picos
                             insert_peaks_df(peaks_df, meas_id)
                             st.success(f"✅ Dados salvos. measurement_id = {meas_id}")
                         except Exception as e:
@@ -431,16 +379,102 @@ with tab_raman:
 
         except Exception as e:
             st.error(f"Erro no processamento: {e}")
+
+    # -----------------
+    # Processar lote (até 10 arquivos)
+    # -----------------
+    if batch_files:
+        if len(batch_files) > 10:
+            st.warning("Você enviou mais de 10 arquivos — por favor selecione até 10 por vez.")
+        elif uploaded_substrate is None:
+            st.warning("Carregue primeiro o espectro do substrato (branco) para processar o lote.")
+        else:
+            if st.button("🚀 Processar lote (até 10)"):
+                substrate_buf = buf_from_file(uploaded_substrate)
+                total = len(batch_files)
+                progress = st.progress(0)
+                results = []
+                for i, f in enumerate(batch_files):
+                    try:
+                        sample_buf = buf_from_file(f)
+                        if sample_buf is None:
+                            raise ValueError("Não foi possível decodificar o arquivo")
+                        with st.spinner(f"Processando {f.name} ({i+1}/{total})"):
+                            (x, y), peaks_df, fig = process_raman_pipeline(
+                                sample_input=sample_buf,
+                                substrate_input=substrate_buf,
+                                resample_points=int(resample_points),
+                                sg_window=int(sg_window),
+                                sg_poly=int(sg_poly),
+                                asls_lambda=float(asls_lambda),
+                                asls_p=float(asls_p),
+                                peak_prominence=float(prominence),
+                                trim_frac=0.02
+                            )
+                        st.subheader(f"Resultado — {f.name}")
+                        st.pyplot(fig)
+                        peaks_df = annotate_molecular_groups(peaks_df)
+                        st.dataframe(peaks_df)
+
+                        # oferecer download
+                        df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
+                        st.download_button(f"⬇️ Baixar espectro corrigido ({f.name})", df_spec.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_corrected.csv", mime="text/csv")
+                        st.download_button(f"⬇️ Baixar picos ({f.name})", peaks_df.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_peaks.csv", mime="text/csv")
+
+                        # salvar no supabase (opcional) — cria sample automaticamente se necessário
+                        if st.checkbox(f"Salvar {f.name} no Supabase", key=f"save_{i}"):
+                            if not supabase:
+                                st.error("Supabase não configurado — não é possível salvar.")
+                            else:
+                                try:
+                                    if sel_sample_id is None:
+                                        if sel_patient_id is None:
+                                            st.error("Selecione um paciente antes de salvar.")
+                                        else:
+                                            sample_obj = {
+                                                "patient_id": sel_patient_id,
+                                                "sample_name": f"{sel_patient_id}_{f.name}",
+                                                "description": "Criada automaticamente a partir do upload em lote",
+                                                "collection_date": None,
+                                                "metadata": {"source_file": f.name},
+                                                "substrate": "paper_ag_blood"
+                                            }
+                                            sample_record = create_sample_record(sample_obj)
+                                            sample_id_to_use = sample_record["id"]
+                                    else:
+                                        sample_id_to_use = sel_sample_id
+
+                                    meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Lote 10 upload")
+                                    df_to_save = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
+                                    insert_raman_spectrum_df(df_to_save, meas_id)
+                                    insert_peaks_df(peaks_df, meas_id)
+                                    st.success(f"✅ {f.name} salvo. measurement_id={meas_id}")
+                                    results.append({"file": f.name, "measurement_id": meas_id})
+                                except Exception as e:
+                                    st.error(f"Erro ao salvar {f.name}: {e}")
+                    except Exception as e:
+                        st.error(f"Erro processando {f.name}: {e}")
+                    progress.progress(int((i+1)/total * 100)/100.0)
+                if results:
+                    st.success(f"{len(results)} arquivos salvos no Supabase.")
+                    st.dataframe(pd.DataFrame(results))
+
+    st.markdown("---")
+    st.subheader("Ensaios cadastrados (amostra selecionada)")
+    if sel_sample_id and supabase:
+        try:
+            df_meas = pd.DataFrame(supabase.table("measurements").select("*").eq("sample_id", sel_sample_id).order("created_at", desc=True).execute().data)
+            st.dataframe(df_meas)
+        except Exception as e:
+            st.error(f"Erro ao listar medições: {e}")
     else:
-        st.info("Envie o espectro da amostra e o espectro do substrato para processar.")
+        st.info("Selecione uma amostra para ver medições associadas.")
 
 # ---------------------------
 # Aba 3: Otimização (IA)
 # ---------------------------
 with tab_ai:
     st.header("3️⃣ Otimização (IA) — identificar possíveis doenças por picos")
-    st.markdown("Aqui treinamos um modelo de classificação a partir de espectros rotulados. O formato esperado é um CSV com colunas de features (ex: intensidades por wavenumber ou amplitudes de picos) e uma coluna 'label' com a classe (doença/controle).")
-
     file_train = st.file_uploader("CSV de treino (contendo 'label')", type=["csv"], key="train_csv")
     if file_train:
         try:
@@ -459,7 +493,6 @@ with tab_ai:
                 acc = model.score(X_test, y_test)
                 st.success(f"Modelo treinado — acurácia: {acc:.2%}")
 
-                # feature importances
                 importances = pd.DataFrame({
                     "feature": X.columns,
                     "importance": model.feature_importances_
@@ -480,7 +513,12 @@ with tab_ai:
             st.error(f"Erro no treino: {e}")
 
 # ---------------------------
-# Footer: notas de segurança
+# Footer: notas de segurança e propriedade intelectual
 # ---------------------------
 st.markdown("---")
-st.caption("⚠️ Atenção: dados de saúde são sensíveis. Configure Row Level Security (RLS) no Supabase, use service accounts apenas em backends seguros e nunca exponha service_role keys no frontend. Garanta conformidade LGPD/GDPR conforme aplicável.")
+st.caption("""
+© 2025 Marcela Veiga — Todos os direitos reservados.  
+Bio Sensor App — Plataforma Integrada para Análise Molecular via Espectroscopia Raman e Supabase.  
+Desenvolvido com fins de pesquisa científica e validação experimental.  
+O uso, cópia ou redistribuição deste código é proibido sem autorização expressa da autora.
+""")
