@@ -1,4 +1,4 @@
-# File: app.py
+# app.py
 # -*- coding: utf-8 -*-
 """
 Bio Sensor App - Streamlit
@@ -7,10 +7,10 @@ Três abas:
 2) Espectrometria Raman (upload individual e upload de até 10 amostras de uma vez)
 3) Otimização (IA)
 
-Esta versão adiciona um layout melhorado para exibição dos resultados:
+Layout:
 - Gráfico principal (espectro ajustado + picos + resíduos)
-- Gráfico secundário (marcadores coloridos por grupo molecular exatamente como o exemplo)
-- Tabela com picos e grupos moleculares
+- Tabela simples com picos e grupos moleculares (sem painel de grupos)
+- Calibração por silício e identificação de picos de substrato (paper / paper+silver)
 - Opção para salvar resultados no Supabase
 """
 import streamlit as st
@@ -21,24 +21,24 @@ import time
 from typing import Optional, List, Dict
 from datetime import datetime
 import matplotlib.pyplot as plt
-from io import BytesIO, StringIO
+from io import BytesIO
 
 # ML
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
-# Supabase
+# Supabase (opcional)
 try:
     from supabase import create_client, Client
 except Exception:
     create_client = None
     Client = None
 
-# Pipeline
+# Pipeline (seu módulo local)
 try:
     from raman_processing import process_raman_pipeline
-except Exception as e:
+except Exception:
     process_raman_pipeline = None
 
 # ---------------------------
@@ -50,8 +50,8 @@ st.title("*Bio Sensor App*")
 # ---------------------------
 # Conexão Supabase (st.secrets)
 # ---------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL") if hasattr(st, 'secrets') else None
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") if hasattr(st, 'secrets') else None
+SUPABASE_URL = st.secrets.get("SUPABASE_URL") if hasattr(st, "secrets") else None
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") if hasattr(st, "secrets") else None
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY and create_client:
@@ -66,7 +66,6 @@ else:
 # ---------------------------
 # Utilidades Supabase (usam supabase client)
 # ---------------------------
-
 def safe_insert(table: str, records: List[Dict]):
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
@@ -82,7 +81,6 @@ def safe_insert(table: str, records: List[Dict]):
         out.extend(res.data or [])
     return out
 
-
 def create_patient_record(patient_obj: Dict) -> Dict:
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
@@ -90,7 +88,6 @@ def create_patient_record(patient_obj: Dict) -> Dict:
     if res.error:
         raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]
-
 
 def find_patient_by_email_or_cpf(email: Optional[str], cpf: Optional[str]) -> Optional[Dict]:
     if not supabase:
@@ -105,7 +102,6 @@ def find_patient_by_email_or_cpf(email: Optional[str], cpf: Optional[str]) -> Op
             return r.data[0]
     return None
 
-
 def create_sample_record(sample_obj: Dict) -> Dict:
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
@@ -113,7 +109,6 @@ def create_sample_record(sample_obj: Dict) -> Dict:
     if res.error:
         raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]
-
 
 def create_measurement_record(sample_id: int, ensaio_type: str, operator: Optional[str]=None, notes: Optional[str]=None) -> int:
     if not supabase:
@@ -124,13 +119,11 @@ def create_measurement_record(sample_id: int, ensaio_type: str, operator: Option
         raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
     return res.data[0]["id"]
 
-
 def insert_raman_spectrum_df(df: pd.DataFrame, measurement_id: int):
     df2 = df.copy()
     df2["measurement_id"] = measurement_id
     records = df2.to_dict(orient="records")
     return safe_insert("raman_spectra", records)
-
 
 def insert_peaks_df(df: pd.DataFrame, measurement_id: int):
     df2 = df.copy()
@@ -138,13 +131,11 @@ def insert_peaks_df(df: pd.DataFrame, measurement_id: int):
     records = df2.to_dict(orient="records")
     return safe_insert("raman_peaks", records)
 
-
 def get_patients_list(limit: int = 500) -> List[Dict]:
     if not supabase:
         return []
     r = supabase.table("patients").select("*").order("created_at", desc=True).limit(limit).execute()
     return r.data or []
-
 
 def get_samples_for_patient(patient_id: int) -> List[Dict]:
     if not supabase:
@@ -180,148 +171,132 @@ GROUP_COLORS = {
     "Desconhecido": "tab:gray"
 }
 
-
+# ---------------------------
+# Função de anotação com substrato
+# ---------------------------
 def annotate_molecular_groups(peaks_df: pd.DataFrame, tolerance: float = 5.0, substrate_type: Optional[str]=None) -> pd.DataFrame:
     """
-    Anota grupos moleculares por wavenumber. Se substrate_type=='paper', marca bandas conhecidas de papel como 'Substrato: Papel'.
+    Anota grupos moleculares por wavenumber.
+    substrate_type: None | 'paper' | 'paper+silver' | 'paper+other'
     """
     PAPER_BANDS = [
         (380, 410, 'Papel - lignina/celulose'),
         (1050, 1110, 'Papel - celulose (C–O)')
     ]
+    PAPER_SILVER_BANDS = [
+        (1000, 1015, 'SERS: Fenilalanina (enriquecido)'),
+        (1325, 1350, 'SERS: modos CH / hemoglobina (alterado)')
+    ]
+
     groups = []
     for _, row in peaks_df.iterrows():
         cen = float(row.get("fit_cen", row.get("peak_cm1", np.nan)))
         match = None
-        # verificar bandas de substrato (papel)
-        if substrate_type and substrate_type.lower() == 'paper':
-            for lo, hi, label in PAPER_BANDS:
-                if lo - tolerance <= cen <= hi + tolerance:
-                    match = f"Substrato: {label}"
-                    break
+        if substrate_type:
+            stype = substrate_type.lower()
+            if stype == 'paper':
+                for lo, hi, label in PAPER_BANDS:
+                    if (lo - tolerance) <= cen <= (hi + tolerance):
+                        match = f"Substrato: {label}"
+                        break
+            elif stype == 'paper+silver':
+                for lo, hi, label in PAPER_SILVER_BANDS:
+                    if (lo - tolerance) <= cen <= (hi + tolerance):
+                        match = f"Substrato: {label}"
+                        break
+                # fallback para bandas padrão de papel
+                if match is None:
+                    for lo, hi, label in PAPER_BANDS:
+                        if (lo - tolerance) <= cen <= (hi + tolerance):
+                            match = f"Substrato: {label}"
+                            break
+            elif stype == 'paper+other':
+                for lo, hi, label in PAPER_BANDS:
+                    if (lo - tolerance) <= cen <= (hi + tolerance):
+                        match = f"Substrato: {label}"
+                        break
+
+        # se não for substrato, mapear molecular normal
         if match is None:
             for (low, high), label in MOLECULAR_MAP.items():
                 if (low - tolerance) <= cen <= (high + tolerance):
                     match = label
                     break
+
         groups.append(match if match else "Desconhecido")
+
     peaks_df = peaks_df.copy()
     peaks_df["molecular_group"] = groups
-    peaks_df["color"] = peaks_df["molecular_group"].map(lambda g: GROUP_COLORS.get(g.split(':')[-1].strip(), "tab:gray") if g.startswith('Substrato:') else GROUP_COLORS.get(g, "tab:gray"))
-    # flag de substrato
+
+    def _color_map(g):
+        if isinstance(g, str) and g.startswith('Substrato:'):
+            return GROUP_COLORS.get("Desconhecido", "tab:gray")
+        return GROUP_COLORS.get(g, "tab:gray")
+
+    peaks_df["color"] = peaks_df["molecular_group"].map(_color_map)
     peaks_df['is_substrate'] = peaks_df['molecular_group'].str.startswith('Substrato:')
     return peaks_df
 
 # ---------------------------
-# Plot helpers (criam layout igual ao exemplo)
+# Plot helpers
 # ---------------------------
-import matplotlib.patches as mpatches
-
 def plot_main_and_residual(x, y, peaks_df, fig_fit=None, title=None):
-    """
-    Plota figura principal muito parecida com o exemplo:
-    - usa fig_fit (se fornecido) para desenhar linhas de ajuste/comp.
-    - adiciona X azul nos picos e caixas amarelas com borda preta.
-    - legenda deslocada à direita (external).
-    - painel de resíduos abaixo.
-    """
-    # tamanho e estilo para se aproximar do exemplo
     fig = plt.figure(figsize=(14, 10), dpi=100)
     gs = fig.add_gridspec(6, 4, hspace=0.6, wspace=0.2)
-    ax_main = fig.add_subplot(gs[0:4, 0:3])   # grande à esquerda
-    ax_legend = fig.add_subplot(gs[0:4, 3])   # área para legenda (vazia)
-    ax_res = fig.add_subplot(gs[5, 0:3])      # resíduos embaixo
+    ax_main = fig.add_subplot(gs[0:4, 0:3])
+    ax_legend = fig.add_subplot(gs[0:4, 3])
+    ax_res = fig.add_subplot(gs[5, 0:3])
 
-    # --- main plot: desenhar dados --- #
-    ax_main.plot(x, y, color='0.3', linewidth=0.9, label='Dados')  # cinza escuro
+    ax_main.plot(x, y, color='0.3', linewidth=0.9, label='Dados')
 
-    # se o seu pipeline já devolveu um fig com componentes, desenhe-o por cima:
-    # se fig_fit for um matplotlib.figure, vamos copiar os artistas (linhas) para ax_main
+    # se fig_fit tiver linhas, copia (compatibilidade)
     if fig_fit is not None and hasattr(fig_fit, 'axes'):
         for a in fig_fit.axes:
             for line in a.get_lines():
-                # duplicar linhas no ax_main (mantém estilos)
                 try:
-                    xdata = line.get_xdata()
-                    ydata = line.get_ydata()
-                    ax_main.plot(xdata, ydata, linestyle=line.get_linestyle(), linewidth=line.get_linewidth(), label=line.get_label(), color=line.get_color())
+                    ax_main.plot(line.get_xdata(), line.get_ydata(),
+                                 linestyle=line.get_linestyle(), linewidth=line.get_linewidth(),
+                                 label=line.get_label(), color=line.get_color())
                 except Exception:
                     pass
 
-    # desenhar picos detectados como X azul e rótulos com caixa amarela
+    # marcar picos com X azul e caixa amarela
     if peaks_df is not None and not peaks_df.empty:
-        # usar 'fit_cen' se existir, senão 'peak_cm1'
         cen_col = 'fit_cen' if 'fit_cen' in peaks_df.columns else ('peak_cm1' if 'peak_cm1' in peaks_df.columns else peaks_df.columns[0])
         height_col = 'fit_height' if 'fit_height' in peaks_df.columns else ('height' if 'height' in peaks_df.columns else None)
 
         xs = peaks_df[cen_col].astype(float)
-        # se houver intensidade do pico use para posicionar rótulo verticalmente, senão posiciona perto do topo
         if height_col and height_col in peaks_df.columns:
             ys_label = peaks_df[height_col].astype(float)
-            # normaliza para ficar abaixo do topo do gráfico
-            ymax = max(y) if len(y)>0 else 1.0
-            ys = np.minimum(ys_label, ymax*0.99)
+            ymax = max(y) if len(y) > 0 else 1.0
+            ys = np.minimum(ys_label, ymax * 0.99)
         else:
             ys = np.full(len(xs), max(y) * 0.98)
 
-        # pontos X grandes, azul com contorno
         ax_main.scatter(xs, ys, marker='x', s=120, linewidths=3, color='royalblue', zorder=10)
 
-        # caixas amarelas como no exemplo (caixa amarela com borda preta e sombra sutil)
         for xpt, ypt in zip(xs, ys):
             lab = f"{float(xpt):.1f}"
-            # deslocar rótulo para cima/direita para evitar sobreposição
             dx = (max(x) - min(x)) * 0.005
             dy = (max(y) - min(y)) * 0.02
             bbox = dict(boxstyle='round,pad=0.2', fc='#fff28a', ec='black', lw=0.8)
-            ax_main.annotate(lab, xy=(xpt, ypt), xytext=(xpt+dx, ypt+dy), textcoords='data', fontsize=9, bbox=bbox, zorder=11)
+            ax_main.annotate(lab, xy=(xpt, ypt), xytext=(xpt + dx, ypt + dy), textcoords='data',
+                              fontsize=9, bbox=bbox, zorder=11)
 
-    # formatação de eixos e grid (igual aparência)
     ax_main.set_xlim(min(x), max(x))
     ax_main.set_ylabel('Intens. Norm.', fontsize=14)
     ax_main.tick_params(axis='both', labelsize=11)
     ax_main.grid(True, linestyle='--', linewidth=0.6, alpha=0.7)
     ax_main.set_title(title if title else '', fontsize=20, pad=14)
 
-    # construir legenda no painel direito (ax_legend)
     ax_legend.axis('off')
-    # coletar handles/labels do ax_main e apresentar numa box parecida
     handles, labels = ax_main.get_legend_handles_labels()
-    # dedupe e ordenar: preferir mostrar 'Dados', 'Ajuste Total', 'Linha Base', 'Pico n'...
-    # se labels vazios, criar legendas manuais (fallback)
     if not labels:
-        handles = []
-        labels = []
-    # desenha legenda como texto para poder controlar estilo
+        handles, labels = [], []
     ax_legend.legend(handles=handles, labels=labels, loc='center left', frameon=True, fontsize=10)
 
-    # --- residual --- #
-    # tentar extrair fit_total do peaks_df (coluna 'fit_total') caso seu pipeline a retorne
-    residual = None
-    if peaks_df is not None and 'fit_total' in peaks_df.columns:
-        # peaks_df não tem fit por ponto geralmente, então pulamos
-        pass
-
-    # fallback: calc. residual se pipeline retornou fig_fit com linha 'Ajuste Total' (procurar por label)
-    if fig_fit is not None and hasattr(fig_fit, 'axes'):
-        # procura por linhas com label 'Ajuste Total' ou 'fit'
-        fit_y = None
-        for a in fig_fit.axes:
-            for line in a.get_lines():
-                lab = (line.get_label() or '').lower()
-                if 'ajuste' in lab or 'fit' in lab or 'ajuste total' in lab:
-                    fit_y = line.get_ydata()
-                    break
-            if fit_y is not None:
-                break
-        if fit_y is not None and len(fit_y) == len(x):
-            residual = y - np.array(fit_y)
-
-    # se não achou residual, desenhar resíduos próximos de zero (igual ao exemplo visual)
-    if residual is None:
-        residual = y - np.interp(x, x, y)  # zero-array (placeholder)
-        residual[:] = 0.0
-
+    # residual (placeholder se não houver fit)
+    residual = np.zeros_like(y)
     ax_res.plot(x, residual, color='green', linewidth=1.2)
     ax_res.axhline(0, color='black', linestyle='--', linewidth=1.2)
     ax_res.set_ylabel('Residuo', fontsize=12)
@@ -329,51 +304,6 @@ def plot_main_and_residual(x, y, peaks_df, fig_fit=None, title=None):
     ax_res.tick_params(axis='both', labelsize=11)
     ax_res.grid(True, linestyle='--', linewidth=0.6, alpha=0.6)
 
-    plt.tight_layout()
-    return fig
-
-
-def plot_groups_panel(peaks_df, title='Grupos Moleculares'):
-    """
-    Plota painel com as faixas / marcadores por grupo molecular igual ao exemplo:
-    - agrupa por molecular_group e alinha pontos em linhas separadas
-    - adiciona cor-box e etiqueta do wavenumber
-    """
-    fig = plt.figure(figsize=(14, 2.5), dpi=100)
-    ax = fig.add_subplot(111)
-
-    if peaks_df is None or peaks_df.empty:
-        ax.text(0.5, 0.5, 'Nenhum pico detectado', ha='center', va='center')
-        ax.set_axis_off()
-        return fig
-
-    # ordens dos grupos mantidas como no MOLECULAR_MAP (se necessário ajustar a ordem manualmente)
-    unique_groups = list(dict.fromkeys(peaks_df['molecular_group'].tolist()))
-    # mapa y para cada grupo (several rows)
-    y_positions = {g: i for i, g in enumerate(unique_groups[::-1])}
-    cen_col = 'fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1'
-
-    xs = peaks_df[cen_col].astype(float)
-    ys = peaks_df['molecular_group'].map(y_positions).astype(float)
-    colors = peaks_df.get('color', ['tab:gray'] * len(peaks_df))
-
-    # pontos grandes com borda preta, preenchimento colorido
-    for xi, yi, ci in zip(xs, ys, colors):
-        ax.scatter(xi, yi, s=140, edgecolor='k', linewidth=0.7, facecolor=ci, zorder=5)
-
-    # rótulos numéricos ao lado direito do marcador (lembra as caixas pequenas do exemplo)
-    dx = (max(xs) - min(xs)) * 0.005
-    for xi, yi in zip(xs, ys):
-        lab = f"{float(xi):.1f}"
-        ax.text(xi + dx, yi, f" {lab}", va='center', fontsize=9)
-
-    # ajustar eixos
-    ax.set_yticks(list(y_positions.values()))
-    ax.set_yticklabels(list(y_positions.keys()), fontsize=10)
-    ax.set_xlabel('Wave (cm⁻1)', fontsize=12)
-    ax.set_xlim(min(xs) - 10, max(xs) + 10)
-    ax.set_ylim(-0.5, max(list(y_positions.values())) + 0.5)
-    ax.grid(False)
     plt.tight_layout()
     return fig
 
@@ -523,9 +453,19 @@ with tab_raman:
         asls_lambda = st.number_input("ASLS lambda", min_value=1.0, value=1e5, format="%.0f")
         asls_p = st.number_input("ASLS p", min_value=0.0, max_value=1.0, value=0.01, format="%.3f")
         prominence = st.number_input("Peak prominence (fraction)", min_value=1e-6, max_value=10.0, value=0.05, format="%.6f")
-        # novos controles: tipo de substrato e calibração de silício
-        substrate_type = st.selectbox("Substrato usado", options=["Nenhum", "paper", "outro"], index=1, help="Escolha 'paper' se o substrato for papel")
-        silicon_calib = st.file_uploader("Arquivo de calibração (Silício) opcional", type=["txt","csv"], help="Se enviado, será usado para calibrar/deslocar o eixo wavenumber para 520.7 cm^-1.")
+
+        # novos controles: tipo de substrato (detalhado) e calibração de silício
+        substrate_type = st.selectbox(
+            "Substrato usado",
+            options=["Nenhum", "paper", "paper+silver", "paper+other"],
+            index=1,
+            help="Escolha 'paper' se amostra for papel; 'paper+silver' para papel com camada de Ag (SERS), ou 'paper+other' para outro recobrimento."
+        )
+        silicon_calib = st.file_uploader(
+            "Arquivo de calibração (Silício) opcional",
+            type=["txt", "csv"],
+            help="Se enviado, será usado para calibrar/deslocar o eixo wavenumber para 520.7 cm^-1."
+        )
 
     st.markdown("---")
     uploaded_substrate = st.file_uploader("Carregar espectro do substrato (branco)", type=["txt", "csv"], key="substrate")
@@ -535,7 +475,15 @@ with tab_raman:
     st.markdown("### Upload em lote (até 10 arquivos) — criar 1 paciente/amostra por arquivo")
     batch_files = st.file_uploader("Selecione até 10 arquivos (.txt, .csv) — um arquivo por paciente", type=["txt", "csv"], accept_multiple_files=True, help="Cada arquivo será tratado como uma amostra de um paciente distinto.")
     create_patient_per_file = st.checkbox("Criar paciente novo para cada arquivo (nome baseado no filename)", value=True)
-    batch_process_btn = st.button("XX Processar e (opcional) salvar lote como novos pacientes")
+    batch_process_btn = st.button("Processar lote (até 10 arquivos)")
+
+    # ler bytes do arquivo de calibração uma vez (reutilizável)
+    silicon_calib_bytes = None
+    if silicon_calib is not None:
+        try:
+            silicon_calib_bytes = silicon_calib.read()
+        except Exception:
+            silicon_calib_bytes = None
 
     # process single
     if uploaded_sample_single and process_raman_pipeline is not None:
@@ -554,53 +502,59 @@ with tab_raman:
                     peak_prominence=float(prominence),
                     trim_frac=0.02
                 )
-            # aplicar calibração de silício (se fornecida) e anotar grupos
-            # se o usuário forneceu um arquivo de calibração, procura pico de Si em 510-530 e calcula deslocamento
-            if 'silicon_calib' in locals() and silicon_calib is not None:
+
+            # --- CALIBRAÇÃO POR SILÍCIO (se fornecida) --- #
+            delta = 0.0
+            if silicon_calib_bytes is not None:
                 try:
-                    silicon_bytes = BytesIO(silicon_calib.read())
-                    # leitura simples do arquivo de calibração
-                    df_si = pd.read_csv(silicon_bytes, sep=None, engine='python', comment='#', header=None)
+                    df_si = pd.read_csv(BytesIO(silicon_calib_bytes), sep=None, engine='python', comment='#', header=None)
                     df_si = df_si.select_dtypes(include=[np.number])
                     xsi = np.asarray(df_si.iloc[:,0], dtype=float)
                     ysi = np.asarray(df_si.iloc[:,1], dtype=float)
-                    # encontrar pico mais alto entre 510-530
-                    mask_si = (xsi>=510) & (xsi<=530)
+                    mask_si = (xsi >= 510) & (xsi <= 530)
                     if mask_si.any():
-                        idx = np.argmax(ysi[mask_si])
-                        observed = xsi[mask_si][idx]
+                        idx_mask = np.where(mask_si)[0]
+                        relative_idx = np.argmax(ysi[mask_si])
+                        observed = xsi[idx_mask[relative_idx]]
                         delta = 520.7 - observed
                     else:
                         delta = 0.0
                 except Exception:
                     delta = 0.0
-            else:
-                delta = 0.0
 
-            # aplicar deslocamento ao eixo e aos picos
+            # aplicar deslocamento ao eixo x e aos centros de pico
             try:
-                if delta != 0.0:
+                if float(delta) != 0.0:
                     x = (np.array(x) + float(delta)).tolist()
-                    peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
+                    if 'fit_cen' in peaks_df.columns:
+                        peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
+                    elif 'peak_cm1' in peaks_df.columns:
+                        peaks_df['peak_cm1'] = peaks_df['peak_cm1'].astype(float) + float(delta)
             except Exception:
                 pass
 
-            peaks_df = annotate_molecular_groups(peaks_df, substrate_type='paper' if substrate_type=='paper' else None)
+            # anotar levando em conta substrato
+            peaks_df = annotate_molecular_groups(peaks_df, substrate_type=substrate_type if substrate_type != 'Nenhum' else None)
 
             # main + residual
             fig_main = plot_main_and_residual(x, y, peaks_df, title=uploaded_sample_single.name)
             st.pyplot(fig_main)
 
-            # --- gráfico de grupos removido ---
-            # tabela simples
+            # tabela simples (sem painel de grupos)
             st.subheader('Tabela de picos e grupos')
-            display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+            display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1',
+                                   'fit_height' if 'fit_height' in peaks_df.columns else ('height' if 'height' in peaks_df.columns else None),
+                                   'molecular_group']].copy()
+            # renomear de forma segura
             display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
             st.dataframe(display_df)
 
+            # downloads
             df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
-            st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv"("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv")
-            st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"), file_name="raman_peaks.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"),
+                               file_name="spectrum_corrected.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"),
+                               file_name="raman_peaks.csv", mime="text/csv")
 
             # save
             if st.button("Salvar espectro e picos no Supabase"):
@@ -618,7 +572,7 @@ with tab_raman:
                                     "description": "Criada automaticamente a partir do upload do espectro",
                                     "collection_date": None,
                                     "metadata": None,
-                                    "substrate": "paper_ag_blood"
+                                    "substrate": substrate_type
                                 }
                                 sample_record = create_sample_record(sample_obj)
                                 sample_id_to_use = sample_record["id"]
@@ -636,7 +590,7 @@ with tab_raman:
         except Exception as e:
             st.error(f"Erro no processamento: {e}")
 
-    # batch processing block (similar to single but loops)
+    # batch processing block
     if batch_files and batch_process_btn:
         if len(batch_files) > 10:
             st.warning("Você enviou mais de 10 arquivos — por favor selecione até 10 por vez.")
@@ -647,6 +601,8 @@ with tab_raman:
             total = len(batch_files)
             progress = st.progress(0)
             results = []
+
+            # se silicon_calib_bytes for fornecido, já lido no topo da aba
             for i, f in enumerate(batch_files):
                 try:
                     file_bytes = f.read()
@@ -664,47 +620,49 @@ with tab_raman:
                             peak_prominence=float(prominence),
                             trim_frac=0.02
                         )
-                    # aplicar calibração de silício (se fornecida) e anotar grupos
-            # se o usuário forneceu um arquivo de calibração, procura pico de Si em 510-530 e calcula deslocamento
-            if 'silicon_calib' in locals() and silicon_calib is not None:
-                try:
-                    silicon_bytes = BytesIO(silicon_calib.read())
-                    # leitura simples do arquivo de calibração
-                    df_si = pd.read_csv(silicon_bytes, sep=None, engine='python', comment='#', header=None)
-                    df_si = df_si.select_dtypes(include=[np.number])
-                    xsi = np.asarray(df_si.iloc[:,0], dtype=float)
-                    ysi = np.asarray(df_si.iloc[:,1], dtype=float)
-                    # encontrar pico mais alto entre 510-530
-                    mask_si = (xsi>=510) & (xsi<=530)
-                    if mask_si.any():
-                        idx = np.argmax(ysi[mask_si])
-                        observed = xsi[mask_si][idx]
-                        delta = 520.7 - observed
-                    else:
-                        delta = 0.0
-                except Exception:
+
+                    # --- CALIBRAÇÃO POR SILÍCIO (se fornecida) --- #
                     delta = 0.0
-            else:
-                delta = 0.0
+                    if silicon_calib_bytes is not None:
+                        try:
+                            df_si = pd.read_csv(BytesIO(silicon_calib_bytes), sep=None, engine='python', comment='#', header=None)
+                            df_si = df_si.select_dtypes(include=[np.number])
+                            xsi = np.asarray(df_si.iloc[:,0], dtype=float)
+                            ysi = np.asarray(df_si.iloc[:,1], dtype=float)
+                            mask_si = (xsi >= 510) & (xsi <= 530)
+                            if mask_si.any():
+                                idx_mask = np.where(mask_si)[0]
+                                relative_idx = np.argmax(ysi[mask_si])
+                                observed = xsi[idx_mask[relative_idx]]
+                                delta = 520.7 - observed
+                            else:
+                                delta = 0.0
+                        except Exception:
+                            delta = 0.0
 
-            # aplicar deslocamento ao eixo e aos picos
-            try:
-                if delta != 0.0:
-                    x = (np.array(x) + float(delta)).tolist()
-                    peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
-            except Exception:
-                pass
+                    # aplicar deslocamento ao eixo x e aos centros de pico
+                    try:
+                        if float(delta) != 0.0:
+                            x = (np.array(x) + float(delta)).tolist()
+                            if 'fit_cen' in peaks_df.columns:
+                                peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
+                            elif 'peak_cm1' in peaks_df.columns:
+                                peaks_df['peak_cm1'] = peaks_df['peak_cm1'].astype(float) + float(delta)
+                    except Exception:
+                        pass
 
-            peaks_df = annotate_molecular_groups(peaks_df, substrate_type='paper' if substrate_type=='paper' else None)
+                    peaks_df = annotate_molecular_groups(peaks_df, substrate_type=substrate_type if substrate_type != 'Nenhum' else None)
 
                     # show main plot
                     st.subheader(f"Resultado — {f.name}")
                     fig_main = plot_main_and_residual(x, y, peaks_df, title=f.name)
                     st.pyplot(fig_main)
 
-                    # --- gráfico de grupos removido ---
+                    # tabela simples
                     st.subheader('Tabela de picos e grupos')
-                    display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+                    display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1',
+                                           'fit_height' if 'fit_height' in peaks_df.columns else ('height' if 'height' in peaks_df.columns else None),
+                                           'molecular_group']].copy()
                     display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
                     st.dataframe(display_df)
 
@@ -726,11 +684,11 @@ with tab_raman:
                                     st.error("Nenhum paciente selecionado para associar — selecione um paciente ou marque 'Criar paciente novo'.")
                                     raise RuntimeError("Paciente não especificado")
 
-                            sample_obj = {"patient_id": patient_id, "sample_name": f"{patient_id}_{f.name}", "description": "Upload em lote — autom. criado", "collection_date": None, "metadata": {"source_file": f.name}, "substrate": "paper_ag_blood"}
+                            sample_obj = {"patient_id": patient_id, "sample_name": f"{patient_id}_{f.name}", "description": "Upload em lote — autom. criado", "collection_date": None, "metadata": {"source_file": f.name}, "substrate": substrate_type}
                             sample_rec = create_sample_record(sample_obj)
                             sample_id_to_use = sample_rec["id"]
 
-                            meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Lote 10 upload via app")
+                            meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Lote upload via app")
                             insert_raman_spectrum_df(pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y}), meas_id)
                             insert_peaks_df(peaks_df, meas_id)
                             st.success(f"✅ {f.name} salvo. measurement_id = {meas_id}")
@@ -789,17 +747,20 @@ with tab_ai:
     if file_peaks:
         try:
             df_peaks = pd.read_csv(file_peaks)
-            peak_col = "fit_cen" if "fit_cen" in df_peaks.columns else "wavenumber_cm1"
-            df_peaks["grupo_molecular"], df_peaks["possivel_doenca"] = zip(*df_peaks[peak_col].apply(find_clinical_association))
-            st.subheader("Associação clínica dos picos detectados")
-            st.dataframe(df_peaks[[peak_col, "grupo_molecular", "possivel_doenca"]])
+            peak_col = "fit_cen" if "fit_cen" in df_peaks.columns else ("wavenumber_cm1" if "wavenumber_cm1" in df_peaks.columns else None)
+            if peak_col is None:
+                st.error("Arquivo precisa ter coluna 'fit_cen' ou 'wavenumber_cm1'.")
+            else:
+                df_peaks["grupo_molecular"], df_peaks["possivel_doenca"] = zip(*df_peaks[peak_col].astype(float).apply(find_clinical_association))
+                st.subheader("Associação clínica dos picos detectados")
+                st.dataframe(df_peaks[[peak_col, "grupo_molecular", "possivel_doenca"]])
 
-            st.download_button(
-                "⬇️ Baixar tabela com interpretações clínicas",
-                df_peaks.to_csv(index=False).encode("utf-8"),
-                file_name="raman_clinical_association.csv",
-                mime="text/csv"
-            )
+                st.download_button(
+                    "⬇️ Baixar tabela com interpretações clínicas",
+                    df_peaks.to_csv(index=False).encode("utf-8"),
+                    file_name="raman_clinical_association.csv",
+                    mime="text/csv"
+                )
         except Exception as e:
             st.error(f"Erro ao analisar arquivo: {e}")
 
@@ -811,4 +772,5 @@ st.caption("""
 © 2025 Marcela Veiga — Todos os direitos reservados.  
 Bio Sensor App — Plataforma Integrada para Análise Molecular via Espectroscopia Raman e Supabase.  
 Desenvolvido com fins de pesquisa científica e validação experimental.  
-O uso, cópia ou redistribuição deste código é proibido sem autoriz
+O uso, cópia ou redistribuição deste código é proibido sem autorização expressa da autora.
+""")
