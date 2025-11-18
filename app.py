@@ -7,11 +7,6 @@ Três abas:
 2) Espectrometria Raman (upload individual e upload de até 10 amostras de uma vez)
 3) Otimização (IA)
 
-Esta versão adiciona um layout melhorado para exibição dos resultados:
-- Gráfico principal (espectro ajustado + picos + resíduos)
-- Gráfico secundário (marcadores coloridos por grupo molecular exatamente como o exemplo)
-- Tabela com picos e grupos moleculares
-- Opção para salvar resultados no Supabase
 """
 import streamlit as st
 import pandas as pd
@@ -431,4 +426,315 @@ with tab_pat:
                                 name = str(row[colname]) if colname and pd.notna(row[colname]) else None
                                 email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
                                 cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
-                                existing = find_pat
+                                existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
+                                if existing:
+                                    patient_record = existing
+                                else:
+                                    patient_obj = {
+                                        "full_name": name or "Desconhecido",
+                                        "email": email,
+                                        "cpf": cpf,
+                                        "created_at": datetime.utcnow().isoformat()
+                                    }
+                                    patient_record = create_patient_record(patient_obj)
+                                sample_obj = {
+                                    "patient_id": patient_record["id"],
+                                    "sample_name": f"FormResponse_{patient_record['id']}_{int(time.time())}",
+                                    "description": "Importado via Google Forms",
+                                    "collection_date": None,
+                                    "metadata": {str(k): (v if pd.notna(v) else None) for k, v in row.items()},
+                                    "substrate": None
+                                }
+                                create_sample_record(sample_obj)
+                                imported.append(patient_record["id"])
+                        st.success(f"Importadas {len(imported)} respostas.")
+                    except Exception as e:
+                        st.error(f"Erro na importação: {e}")
+
+    st.markdown("---")
+    st.subheader("Pacientes cadastrados (últimos 200)")
+    if supabase:
+        try:
+            patients = get_patients_list(200)
+            st.dataframe(pd.DataFrame(patients))
+        except Exception as e:
+            st.error(f"Erro listando pacientes: {e}")
+    else:
+        st.info("Conecte ao Supabase para ver a lista de pacientes.")
+
+# ---------------------------
+# Aba 2: Espectrometria Raman
+# ---------------------------
+with tab_raman:
+    st.header("2️⃣ Espectrometria Raman — processamento e anotação")
+
+    if process_raman_pipeline is None:
+        st.error("Módulo raman_processing.py não encontrado ou com erro. Coloque no mesmo diretório.")
+
+    patients = get_patients_list(200) if supabase else []
+    patient_map = {f"{p['id']} - {p['full_name']}": p["id"] for p in patients} if patients else {}
+
+    st.subheader("Escolha paciente / amostra")
+    col_pa, col_pb = st.columns([1, 2])
+
+    with col_pa:
+        if patient_map:
+            sel_patient_label = st.selectbox("Paciente", list(patient_map.keys()))
+            sel_patient_id = patient_map[sel_patient_label]
+            if supabase:
+                samp_res = supabase.table("samples").select("*").eq("patient_id", sel_patient_id).order("created_at", desc=True).execute()
+                patient_samples = samp_res.data or []
+            else:
+                patient_samples = []
+            samp_map = {f"{s['id']} - {s['sample_name']}": s["id"] for s in patient_samples} if patient_samples else {}
+            sel_sample_label = st.selectbox("Amostra (opcional, para salvar)", [""] + list(samp_map.keys()))
+            sel_sample_id = samp_map[sel_sample_label] if sel_sample_label else None
+        else:
+            st.info("Nenhum paciente encontrado — importe formulário ou cadastre um paciente.")
+            sel_patient_id = None
+            sel_sample_id = None
+
+    with col_pb:
+        st.subheader("Parâmetros de processamento")
+        resample_points = st.number_input("Resample points", min_value=256, max_value=16384, value=2048, step=256)
+        sg_window = st.number_input("Savitzky-Golay window", min_value=5, max_value=101, value=11, step=2)
+        sg_poly = st.number_input("Savitzky-Golay poly", min_value=1, max_value=5, value=2)
+        asls_lambda = st.number_input("ASLS lambda", min_value=1.0, value=1e5, format="%.0f")
+        asls_p = st.number_input("ASLS p", min_value=0.0, max_value=1.0, value=0.01, format="%.3f")
+        prominence = st.number_input("Peak prominence (fraction)", min_value=1e-6, max_value=10.0, value=0.05, format="%.6f")
+
+    st.markdown("---")
+    uploaded_substrate = st.file_uploader("Carregar espectro do substrato (branco)", type=["txt", "csv"], key="substrate")
+    uploaded_sample_single = st.file_uploader("Upload único (um espectro)", type=["txt", "csv"], key="single")
+
+    # batch
+    st.markdown("### Upload em lote (até 10 arquivos) — criar 1 paciente/amostra por arquivo")
+    batch_files = st.file_uploader("Selecione até 10 arquivos (.txt, .csv) — um arquivo por paciente", type=["txt", "csv"], accept_multiple_files=True, help="Cada arquivo será tratado como uma amostra de um paciente distinto.")
+    create_patient_per_file = st.checkbox("Criar paciente novo para cada arquivo (nome baseado no filename)", value=True)
+    batch_process_btn = st.button("XX Processar e (opcional) salvar lote como novos pacientes")
+
+    # process single
+    if uploaded_sample_single and process_raman_pipeline is not None:
+        try:
+            sample_buf = BytesIO(uploaded_sample_single.read())
+            substrate_buf = BytesIO(uploaded_substrate.read()) if uploaded_substrate else None
+            with st.spinner("Processando..."):
+                (x, y), peaks_df, fig_fit = process_raman_pipeline(
+                    sample_input=sample_buf,
+                    substrate_input=substrate_buf,
+                    resample_points=int(resample_points),
+                    sg_window=int(sg_window),
+                    sg_poly=int(sg_poly),
+                    asls_lambda=float(asls_lambda),
+                    asls_p=float(asls_p),
+                    peak_prominence=float(prominence),
+                    trim_frac=0.02
+                )
+            peaks_df = annotate_molecular_groups(peaks_df)
+
+            # main + residual
+            fig_main = plot_main_and_residual(x, y, peaks_df, title=uploaded_sample_single.name)
+            st.pyplot(fig_main)
+
+            # groups panel and table side-by-side
+            gcol1, gcol2 = st.columns([2, 1])
+            with gcol1:
+                fig_groups = plot_groups_panel(peaks_df)
+                st.pyplot(fig_groups)
+            with gcol2:
+                st.subheader('Tabela de picos e grupos')
+                display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+                display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
+                st.dataframe(display_df)
+
+            # downloads
+            df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
+            st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"), file_name="raman_peaks.csv", mime="text/csv")
+
+            # save
+            if st.button("Salvar espectro e picos no Supabase"):
+                if not supabase:
+                    st.error("Supabase não configurado — não é possível salvar.")
+                else:
+                    try:
+                        if sel_sample_id is None:
+                            if sel_patient_id is None:
+                                st.error("Selecione um paciente ou importe o Google Forms antes de salvar.")
+                            else:
+                                sample_obj = {
+                                    "patient_id": sel_patient_id,
+                                    "sample_name": f"Sample_auto_{int(time.time())}",
+                                    "description": "Criada automaticamente a partir do upload do espectro",
+                                    "collection_date": None,
+                                    "metadata": None,
+                                    "substrate": "paper_ag_blood"
+                                }
+                                sample_record = create_sample_record(sample_obj)
+                                sample_id_to_use = sample_record["id"]
+                        else:
+                            sample_id_to_use = sel_sample_id
+
+                        meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Process via app")
+                        df_to_save = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
+                        insert_raman_spectrum_df(df_to_save, meas_id)
+                        insert_peaks_df(peaks_df, meas_id)
+                        st.success(f"✅ Dados salvos. measurement_id = {meas_id}")
+                    except Exception as e:
+                        st.error(f"Erro ao salvar: {e}")
+
+        except Exception as e:
+            st.error(f"Erro no processamento: {e}")
+
+    # batch processing block (similar to single but loops)
+    if batch_files and batch_process_btn:
+        if len(batch_files) > 10:
+            st.warning("Você enviou mais de 10 arquivos — por favor selecione até 10 por vez.")
+        elif process_raman_pipeline is None:
+            st.error("Módulo raman_processing.py não encontrado — não é possível processar.")
+        else:
+            substrate_bytes = BytesIO(uploaded_substrate.read()) if uploaded_substrate else None
+            total = len(batch_files)
+            progress = st.progress(0)
+            results = []
+            for i, f in enumerate(batch_files):
+                try:
+                    file_bytes = f.read()
+                    sample_input = BytesIO(file_bytes)
+                    substrate_input = substrate_bytes
+                    with st.spinner(f"Processando {f.name} ({i+1}/{total})"):
+                        (x, y), peaks_df, fig_fit = process_raman_pipeline(
+                            sample_input=sample_input,
+                            substrate_input=substrate_input,
+                            resample_points=int(resample_points),
+                            sg_window=int(sg_window),
+                            sg_poly=int(sg_poly),
+                            asls_lambda=float(asls_lambda),
+                            asls_p=float(asls_p),
+                            peak_prominence=float(prominence),
+                            trim_frac=0.02
+                        )
+                    peaks_df = annotate_molecular_groups(peaks_df)
+
+                    # show main plot
+                    st.subheader(f"Resultado — {f.name}")
+                    fig_main = plot_main_and_residual(x, y, peaks_df, title=f.name)
+                    st.pyplot(fig_main)
+
+                    # groups and table
+                    gcol1, gcol2 = st.columns([2, 1])
+                    with gcol1:
+                        fig_groups = plot_groups_panel(peaks_df)
+                        st.pyplot(fig_groups)
+                    with gcol2:
+                        st.subheader('Tabela de picos e grupos')
+                        display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+                        display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
+                        st.dataframe(display_df)
+
+                    # downloads
+                    df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
+                    st.download_button(f"⬇️ Baixar espectro corrigido ({f.name})", df_spec.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_corrected.csv", mime="text/csv")
+                    st.download_button(f"⬇️ Baixar picos ({f.name})", peaks_df.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_peaks.csv", mime="text/csv")
+
+                    # optional save per file
+                    if supabase and st.checkbox(f"Salvar {f.name} no Supabase (criar paciente/amostra)", key=f"save_{i}"):
+                        try:
+                            if create_patient_per_file:
+                                suggested_name = f.name.split()[0]
+                                patient_obj = {"full_name": suggested_name, "email": None, "cpf": None, "created_at": datetime.utcnow().isoformat()}
+                                patient_rec = create_patient_record(patient_obj)
+                                patient_id = patient_rec["id"]
+                            else:
+                                patient_id = sel_patient_id if 'sel_patient_id' in globals() and sel_patient_id else None
+                                if patient_id is None:
+                                    st.error("Nenhum paciente selecionado para associar — selecione um paciente ou marque 'Criar paciente novo'.")
+                                    raise RuntimeError("Paciente não especificado")
+
+                            sample_obj = {"patient_id": patient_id, "sample_name": f"{patient_id}_{f.name}", "description": "Upload em lote — autom. criado", "collection_date": None, "metadata": {"source_file": f.name}, "substrate": "paper_ag_blood"}
+                            sample_rec = create_sample_record(sample_obj)
+                            sample_id_to_use = sample_rec["id"]
+
+                            meas_id = create_measurement_record(sample_id_to_use, "raman", operator=None, notes="Lote 10 upload via app")
+                            insert_raman_spectrum_df(pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y}), meas_id)
+                            insert_peaks_df(peaks_df, meas_id)
+                            st.success(f"✅ {f.name} salvo. measurement_id = {meas_id}")
+                            results.append({"file": f.name, "measurement_id": meas_id})
+                        except Exception as e:
+                            st.error(f"Erro ao salvar {f.name}: {e}")
+
+                except Exception as e:
+                    st.error(f"Erro processando {f.name}: {e}")
+                progress.progress(int(((i+1)/total) * 100))
+
+            if results:
+                st.success(f"{len(results)} arquivos salvos no Supabase.")
+                st.dataframe(pd.DataFrame(results))
+
+    st.markdown("---")
+    st.subheader("Ensaios cadastrados (amostra selecionada)")
+    if sel_sample_id and supabase:
+        try:
+            df_meas = pd.DataFrame(supabase.table("measurements").select("*").eq("sample_id", sel_sample_id).order("created_at", desc=True).execute().data)
+            st.dataframe(df_meas)
+        except Exception as e:
+            st.error(f"Erro ao listar medições: {e}")
+    else:
+        st.info("Selecione uma amostra para ver medições associadas.")
+
+# ---------------------------
+# Aba 3: Otimização (IA)
+# ---------------------------
+with tab_ai:
+    st.header("3️⃣ Otimização (IA) — associação de picos a possíveis doenças")
+
+    st.markdown("### Upload de tabela de picos (CSV gerado na aba 2)")
+    file_peaks = st.file_uploader("CSV contendo colunas 'wavenumber_cm1' ou 'fit_cen'", type=["csv"], key="clinical_csv")
+
+    # mapa clínico simples baseado nas regiões típicas
+    CLINICAL_MAP = [
+        (735, 770, "Porfirina / Heme (Hb)", "Alterações podem indicar hipóxia, anemia, inflamação, talassemia, alterações do estado redox da hemoglobina."),
+        (995, 1015, "Fenilalanina", "Associada a processos inflamatórios sistêmicos, cânceres sólidos, resposta imune ativada."),
+        (1120, 1170, "Carotenoides", "Marcador de estresse oxidativo; alterações associadas a câncer, doenças cardiovasculares e inflamação crônica."),
+        (1230, 1300, "Amida III", "Mudanças estruturais em proteínas: inflamação, doenças hepáticas, infecções, sepse e câncer."),
+        (1320, 1380, "Modos ligados à hemoglobina", "Deslocamentos refletem hipóxia, diabetes, disfunção pulmonar e alterações metabólicas relativas à hemoglobina."),
+        (1420, 1470, "Lipídeos (CH2/CH3)", "Alterações são fortes marcadores de diabetes, obesidade, doenças hepáticas e inflamação."),
+        (1490, 1590, "Bandas porfirínicas (Hb)", "Indicador de oxigenação/desoxigenação anormal, metemoglobinemia, inflamação e doenças hematológicas."),
+        (1590, 1620, "Aromáticos (Tyr/Trp)", "Marcadores de estresse oxidativo, apoptose e processos neoplásicos."),
+        (1620, 1690, "Amida I", "Desordem estrutural proteica; associado a sepse, câncer, inflamação intensa e doenças neurodegenerativas."),
+        (2800, 3000, "C–H (lipídeos/proteínas)", "Alterações indicam doenças metabólicas, diabetes e estados inflamatórios."),
+    ]
+
+    def find_clinical_association(peak):
+        for lo, hi, group, disease in CLINICAL_MAP:
+            if lo <= peak <= hi:
+                return group, disease
+        return "Desconhecido", "Nenhuma associação clínica conhecida para esta região."
+
+    if file_peaks:
+        try:
+            df_peaks = pd.read_csv(file_peaks)
+            peak_col = "fit_cen" if "fit_cen" in df_peaks.columns else "wavenumber_cm1"
+            df_peaks["grupo_molecular"], df_peaks["possivel_doenca"] = zip(*df_peaks[peak_col].apply(find_clinical_association))
+            st.subheader("Associação clínica dos picos detectados")
+            st.dataframe(df_peaks[[peak_col, "grupo_molecular", "possivel_doenca"]])
+
+            st.download_button(
+                "⬇️ Baixar tabela com interpretações clínicas",
+                df_peaks.to_csv(index=False).encode("utf-8"),
+                file_name="raman_clinical_association.csv",
+                mime="text/csv"
+            )
+        except Exception as e:
+            st.error(f"Erro ao analisar arquivo: {e}")
+
+# ---------------------------
+# Footer: notas de segurança e propriedade intelectual
+# ---------------------------
+st.markdown("---")
+st.caption("""
+© 2025 Marcela Veiga — Todos os direitos reservados.  
+Bio Sensor App — Plataforma Integrada para Análise Molecular via Espectroscopia Raman e Supabase.  
+Desenvolvido com fins de pesquisa científica e validação experimental.  
+O uso, cópia ou redistribuição deste código é proibido sem autorização expressa da autora.
+""")
