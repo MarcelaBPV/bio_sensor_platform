@@ -7,11 +7,7 @@
 >
 > **Veiga, M. (2025). Bio Sensor App: Plataforma Integrada para Análise Molecular via Espectroscopia Raman e Supabase.**
 
-# Bio Sensor App — Plataforma Raman Integrada com Supabase
-
-Plataforma web em **Streamlit** conectada ao **Supabase** para cadastro de pacientes, análise de espectros Raman e otimização por IA.  
-Projetada para aplicações em **biossensoriamento**, **análise molecular de sangue** e **caracterização de superfícies**.  
-
+Bio Sensor App — Plataforma Raman Integrada com Supabase
 Desenvolvido em Python, totalmente modular e compatível com **deploy via GitHub + Streamlit Cloud**.
 
 ---
