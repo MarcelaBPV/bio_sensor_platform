@@ -181,19 +181,35 @@ GROUP_COLORS = {
 }
 
 
-def annotate_molecular_groups(peaks_df: pd.DataFrame, tolerance: float = 5.0) -> pd.DataFrame:
+def annotate_molecular_groups(peaks_df: pd.DataFrame, tolerance: float = 5.0, substrate_type: Optional[str]=None) -> pd.DataFrame:
+    """
+    Anota grupos moleculares por wavenumber. Se substrate_type=='paper', marca bandas conhecidas de papel como 'Substrato: Papel'.
+    """
+    PAPER_BANDS = [
+        (380, 410, 'Papel - lignina/celulose'),
+        (1050, 1110, 'Papel - celulose (C–O)')
+    ]
     groups = []
     for _, row in peaks_df.iterrows():
         cen = float(row.get("fit_cen", row.get("peak_cm1", np.nan)))
         match = None
-        for (low, high), label in MOLECULAR_MAP.items():
-            if (low - tolerance) <= cen <= (high + tolerance):
-                match = label
-                break
+        # verificar bandas de substrato (papel)
+        if substrate_type and substrate_type.lower() == 'paper':
+            for lo, hi, label in PAPER_BANDS:
+                if lo - tolerance <= cen <= hi + tolerance:
+                    match = f"Substrato: {label}"
+                    break
+        if match is None:
+            for (low, high), label in MOLECULAR_MAP.items():
+                if (low - tolerance) <= cen <= (high + tolerance):
+                    match = label
+                    break
         groups.append(match if match else "Desconhecido")
     peaks_df = peaks_df.copy()
     peaks_df["molecular_group"] = groups
-    peaks_df["color"] = peaks_df["molecular_group"].map(lambda g: GROUP_COLORS.get(g, "tab:gray"))
+    peaks_df["color"] = peaks_df["molecular_group"].map(lambda g: GROUP_COLORS.get(g.split(':')[-1].strip(), "tab:gray") if g.startswith('Substrato:') else GROUP_COLORS.get(g, "tab:gray"))
+    # flag de substrato
+    peaks_df['is_substrate'] = peaks_df['molecular_group'].str.startswith('Substrato:')
     return peaks_df
 
 # ---------------------------
@@ -507,6 +523,9 @@ with tab_raman:
         asls_lambda = st.number_input("ASLS lambda", min_value=1.0, value=1e5, format="%.0f")
         asls_p = st.number_input("ASLS p", min_value=0.0, max_value=1.0, value=0.01, format="%.3f")
         prominence = st.number_input("Peak prominence (fraction)", min_value=1e-6, max_value=10.0, value=0.05, format="%.6f")
+        # novos controles: tipo de substrato e calibração de silício
+        substrate_type = st.selectbox("Substrato usado", options=["Nenhum", "paper", "outro"], index=1, help="Escolha 'paper' se o substrato for papel")
+        silicon_calib = st.file_uploader("Arquivo de calibração (Silício) opcional", type=["txt","csv"], help="Se enviado, será usado para calibrar/deslocar o eixo wavenumber para 520.7 cm^-1.")
 
     st.markdown("---")
     uploaded_substrate = st.file_uploader("Carregar espectro do substrato (branco)", type=["txt", "csv"], key="substrate")
@@ -535,7 +554,38 @@ with tab_raman:
                     peak_prominence=float(prominence),
                     trim_frac=0.02
                 )
-            peaks_df = annotate_molecular_groups(peaks_df)
+            # aplicar calibração de silício (se fornecida) e anotar grupos
+            # se o usuário forneceu um arquivo de calibração, procura pico de Si em 510-530 e calcula deslocamento
+            if 'silicon_calib' in locals() and silicon_calib is not None:
+                try:
+                    silicon_bytes = BytesIO(silicon_calib.read())
+                    # leitura simples do arquivo de calibração
+                    df_si = pd.read_csv(silicon_bytes, sep=None, engine='python', comment='#', header=None)
+                    df_si = df_si.select_dtypes(include=[np.number])
+                    xsi = np.asarray(df_si.iloc[:,0], dtype=float)
+                    ysi = np.asarray(df_si.iloc[:,1], dtype=float)
+                    # encontrar pico mais alto entre 510-530
+                    mask_si = (xsi>=510) & (xsi<=530)
+                    if mask_si.any():
+                        idx = np.argmax(ysi[mask_si])
+                        observed = xsi[mask_si][idx]
+                        delta = 520.7 - observed
+                    else:
+                        delta = 0.0
+                except Exception:
+                    delta = 0.0
+            else:
+                delta = 0.0
+
+            # aplicar deslocamento ao eixo e aos picos
+            try:
+                if delta != 0.0:
+                    x = (np.array(x) + float(delta)).tolist()
+                    peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
+            except Exception:
+                pass
+
+            peaks_df = annotate_molecular_groups(peaks_df, substrate_type='paper' if substrate_type=='paper' else None)
 
             # main + residual
             fig_main = plot_main_and_residual(x, y, peaks_df, title=uploaded_sample_single.name)
@@ -614,7 +664,38 @@ with tab_raman:
                             peak_prominence=float(prominence),
                             trim_frac=0.02
                         )
-                    peaks_df = annotate_molecular_groups(peaks_df)
+                    # aplicar calibração de silício (se fornecida) e anotar grupos
+            # se o usuário forneceu um arquivo de calibração, procura pico de Si em 510-530 e calcula deslocamento
+            if 'silicon_calib' in locals() and silicon_calib is not None:
+                try:
+                    silicon_bytes = BytesIO(silicon_calib.read())
+                    # leitura simples do arquivo de calibração
+                    df_si = pd.read_csv(silicon_bytes, sep=None, engine='python', comment='#', header=None)
+                    df_si = df_si.select_dtypes(include=[np.number])
+                    xsi = np.asarray(df_si.iloc[:,0], dtype=float)
+                    ysi = np.asarray(df_si.iloc[:,1], dtype=float)
+                    # encontrar pico mais alto entre 510-530
+                    mask_si = (xsi>=510) & (xsi<=530)
+                    if mask_si.any():
+                        idx = np.argmax(ysi[mask_si])
+                        observed = xsi[mask_si][idx]
+                        delta = 520.7 - observed
+                    else:
+                        delta = 0.0
+                except Exception:
+                    delta = 0.0
+            else:
+                delta = 0.0
+
+            # aplicar deslocamento ao eixo e aos picos
+            try:
+                if delta != 0.0:
+                    x = (np.array(x) + float(delta)).tolist()
+                    peaks_df['fit_cen'] = peaks_df['fit_cen'].astype(float) + float(delta)
+            except Exception:
+                pass
+
+            peaks_df = annotate_molecular_groups(peaks_df, substrate_type='paper' if substrate_type=='paper' else None)
 
                     # show main plot
                     st.subheader(f"Resultado — {f.name}")
@@ -730,5 +811,4 @@ st.caption("""
 © 2025 Marcela Veiga — Todos os direitos reservados.  
 Bio Sensor App — Plataforma Integrada para Análise Molecular via Espectroscopia Raman e Supabase.  
 Desenvolvido com fins de pesquisa científica e validação experimental.  
-O uso, cópia ou redistribuição deste código é proibido sem autorização expressa da autora.
-""")
+O uso, cópia ou redistribuição deste código é proibido sem autoriz
