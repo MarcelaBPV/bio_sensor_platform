@@ -503,7 +503,7 @@ with tab_raman:
     st.markdown("### Upload em lote (até 10 arquivos) — criar 1 paciente/amostra por arquivo")
     batch_files = st.file_uploader("Selecione até 10 arquivos (.txt, .csv) — um arquivo por paciente", type=["txt", "csv"], accept_multiple_files=True, help="Cada arquivo será tratado como uma amostra de um paciente distinto.")
     create_patient_per_file = st.checkbox("Criar paciente novo para cada arquivo (nome baseado no filename)", value=True)
-    batch_process_btn = st.button("🚀 Processar e (opcional) salvar lote como novos pacientes")
+    batch_process_btn = st.button("XX Processar e (opcional) salvar lote como novos pacientes")
 
     # process single
     if uploaded_sample_single and process_raman_pipeline is not None:
@@ -545,7 +545,7 @@ with tab_raman:
             st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"), file_name="raman_peaks.csv", mime="text/csv")
 
             # save
-            if st.button("💾 Salvar espectro e picos no Supabase"):
+            if st.button("Salvar espectro e picos no Supabase"):
                 if not supabase:
                     st.error("Supabase não configurado — não é possível salvar.")
                 else:
