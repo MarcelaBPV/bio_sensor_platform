@@ -21,7 +21,7 @@ except Exception:
             print("warning:", args, kwargs)
     messagebox = _DummyMsg()
 
-# ---- sua função de suavização (copiada/adaptada) ----
+# ---- sua função de suavização ----
 def _apply_smoothing(self_or_none, y_data, window, order):
     """Aplica a suavização Savitzky-Golay (baseado no código existente).
 
