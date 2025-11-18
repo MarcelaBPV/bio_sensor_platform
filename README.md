@@ -52,12 +52,6 @@ bio_sensor_app/
 └── utils/
     └── batch_import.py    
 
-## Créditos
-
-Desenvolvido por **Marcela Veiga**  
-Baseado em protocolos de caracterização molecular de sangue via Raman sobre substratos de papel.  
-Integração Supabase + Streamlit
-
 ## Licença
 
 Este projeto está protegido por direitos autorais.  
