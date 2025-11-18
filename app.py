@@ -7,6 +7,11 @@ Três abas:
 2) Espectrometria Raman (upload individual e upload de até 10 amostras de uma vez)
 3) Otimização (IA)
 
+Esta versão adiciona um layout melhorado para exibição dos resultados:
+- Gráfico principal (espectro ajustado + picos + resíduos)
+- Gráfico secundário (marcadores coloridos por grupo molecular exatamente como o exemplo)
+- Tabela com picos e grupos moleculares
+- Opção para salvar resultados no Supabase
 """
 import streamlit as st
 import pandas as pd
@@ -536,20 +541,15 @@ with tab_raman:
             fig_main = plot_main_and_residual(x, y, peaks_df, title=uploaded_sample_single.name)
             st.pyplot(fig_main)
 
-            # groups panel and table side-by-side
-            gcol1, gcol2 = st.columns([2, 1])
-            with gcol1:
-                fig_groups = plot_groups_panel(peaks_df)
-                st.pyplot(fig_groups)
-            with gcol2:
-                st.subheader('Tabela de picos e grupos')
-                display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
-                display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
-                st.dataframe(display_df)
+            # --- gráfico de grupos removido ---
+            # tabela simples
+            st.subheader('Tabela de picos e grupos')
+            display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+            display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
+            st.dataframe(display_df)
 
-            # downloads
             df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
-            st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv")
+            st.download_button("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv"("⬇️ Baixar espectro corrigido (CSV)", df_spec.to_csv(index=False).encode("utf-8"), file_name="spectrum_corrected.csv", mime="text/csv")
             st.download_button("⬇️ Baixar picos (CSV)", peaks_df.to_csv(index=False).encode("utf-8"), file_name="raman_peaks.csv", mime="text/csv")
 
             # save
@@ -621,18 +621,12 @@ with tab_raman:
                     fig_main = plot_main_and_residual(x, y, peaks_df, title=f.name)
                     st.pyplot(fig_main)
 
-                    # groups and table
-                    gcol1, gcol2 = st.columns([2, 1])
-                    with gcol1:
-                        fig_groups = plot_groups_panel(peaks_df)
-                        st.pyplot(fig_groups)
-                    with gcol2:
-                        st.subheader('Tabela de picos e grupos')
-                        display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
-                        display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
-                        st.dataframe(display_df)
+                    # --- gráfico de grupos removido ---
+                    st.subheader('Tabela de picos e grupos')
+                    display_df = peaks_df[['fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1', 'fit_height' if 'fit_height' in peaks_df.columns else 'height', 'molecular_group']].copy()
+                    display_df.columns = ['wavenumber_cm1', 'intensity', 'molecular_group']
+                    st.dataframe(display_df)
 
-                    # downloads
                     df_spec = pd.DataFrame({"wavenumber_cm1": x, "intensity_a": y})
                     st.download_button(f"⬇️ Baixar espectro corrigido ({f.name})", df_spec.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_corrected.csv", mime="text/csv")
                     st.download_button(f"⬇️ Baixar picos ({f.name})", peaks_df.to_csv(index=False).encode("utf-8"), file_name=f"{f.name}_peaks.csv", mime="text/csv")
