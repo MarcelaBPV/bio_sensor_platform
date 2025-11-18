@@ -186,74 +186,165 @@ def annotate_molecular_groups(peaks_df: pd.DataFrame, tolerance: float = 5.0) ->
 # Plot helpers (criam layout igual ao exemplo)
 # ---------------------------
 
-def plot_main_and_residual(x, y, peaks_df, title=None):
-    fig = plt.figure(figsize=(10, 8))
-    gs = fig.add_gridspec(3, 1, height_ratios=[3, 0.05, 1], hspace=0.35)
+import matplotlib.patches as mpatches
 
-    ax_main = fig.add_subplot(gs[0, 0])
-    ax_res = fig.add_subplot(gs[2, 0])
+def plot_main_and_residual(x, y, peaks_df, fig_fit=None, title=None):
+    """
+    Plota figura principal muito parecida com o exemplo:
+    - usa fig_fit (se fornecido) para desenhar linhas de ajuste/comp.
+    - adiciona X azul nos picos e caixas amarelas com borda preta.
+    - legenda deslocada à direita (external).
+    - painel de resíduos abaixo.
+    """
+    # tamanho e estilo para se aproximar do exemplo
+    fig = plt.figure(figsize=(14, 10), dpi=100)
+    gs = fig.add_gridspec(6, 4, hspace=0.6, wspace=0.2)
+    ax_main = fig.add_subplot(gs[0:4, 0:3])   # grande à esquerda
+    ax_legend = fig.add_subplot(gs[0:4, 3])   # área para legenda (vazia)
+    ax_res = fig.add_subplot(gs[5, 0:3])      # resíduos embaixo
 
-    # main: plot data (gray) and synthetic fit if available in peaks_df -> assume peaks_df may contain 'fit_total' column
-    ax_main.plot(x, y, color='gray', linewidth=0.8, label='Dados')
+    # --- main plot: desenhar dados --- #
+    ax_main.plot(x, y, color='0.3', linewidth=0.9, label='Dados')  # cinza escuro
 
-    # If peaks_df contains components, they will be plotted elsewhere by caller. Here we plot markers for detected peaks
+    # se o seu pipeline já devolveu um fig com componentes, desenhe-o por cima:
+    # se fig_fit for um matplotlib.figure, vamos copiar os artistas (linhas) para ax_main
+    if fig_fit is not None and hasattr(fig_fit, 'axes'):
+        for a in fig_fit.axes:
+            for line in a.get_lines():
+                # duplicar linhas no ax_main (mantém estilos)
+                try:
+                    xdata = line.get_xdata()
+                    ydata = line.get_ydata()
+                    ax_main.plot(xdata, ydata, linestyle=line.get_linestyle(), linewidth=line.get_linewidth(), label=line.get_label(), color=line.get_color())
+                except Exception:
+                    pass
+
+    # desenhar picos detectados como X azul e rótulos com caixa amarela
     if peaks_df is not None and not peaks_df.empty:
-        # markers
-        ax_main.scatter(peaks_df['fit_cen'] if 'fit_cen' in peaks_df.columns else peaks_df['peak_cm1'],
-                        peaks_df.get('fit_height', np.ones(len(peaks_df))) * 0.98,
-                        marker='x', s=70, linewidths=2, color='blue', label='Picos Detectados')
+        # usar 'fit_cen' se existir, senão 'peak_cm1'
+        cen_col = 'fit_cen' if 'fit_cen' in peaks_df.columns else ('peak_cm1' if 'peak_cm1' in peaks_df.columns else peaks_df.columns[0])
+        height_col = 'fit_height' if 'fit_height' in peaks_df.columns else ('height' if 'height' in peaks_df.columns else None)
 
-        # annotate labels (small boxes) near markers
-        for idx, r in peaks_df.iterrows():
-            cen = r.get('fit_cen', r.get('peak_cm1'))
-            lab = f"{float(cen):.1f}"
-            ax_main.annotate(lab, xy=(cen, 0.98), xytext=(5, 5), textcoords='offset points', bbox=dict(boxstyle='round,pad=0.2', fc='yellow', alpha=0.7), fontsize=8)
+        xs = peaks_df[cen_col].astype(float)
+        # se houver intensidade do pico use para posicionar rótulo verticalmente, senão posiciona perto do topo
+        if height_col and height_col in peaks_df.columns:
+            ys_label = peaks_df[height_col].astype(float)
+            # normaliza para ficar abaixo do topo do gráfico
+            ymax = max(y) if len(y)>0 else 1.0
+            ys = np.minimum(ys_label, ymax*0.99)
+        else:
+            ys = np.full(len(xs), max(y) * 0.98)
 
-    ax_main.set_ylabel('Intens. Norm.')
+        # pontos X grandes, azul com contorno
+        ax_main.scatter(xs, ys, marker='x', s=120, linewidths=3, color='royalblue', zorder=10)
+
+        # caixas amarelas como no exemplo (caixa amarela com borda preta e sombra sutil)
+        for xpt, ypt in zip(xs, ys):
+            lab = f"{float(xpt):.1f}"
+            # deslocar rótulo para cima/direita para evitar sobreposição
+            dx = (max(x) - min(x)) * 0.005
+            dy = (max(y) - min(y)) * 0.02
+            bbox = dict(boxstyle='round,pad=0.2', fc='#fff28a', ec='black', lw=0.8)
+            ax_main.annotate(lab, xy=(xpt, ypt), xytext=(xpt+dx, ypt+dy), textcoords='data', fontsize=9, bbox=bbox, zorder=11)
+
+    # formatação de eixos e grid (igual aparência)
     ax_main.set_xlim(min(x), max(x))
-    ax_main.grid(True, linestyle='--', linewidth=0.5)
-    ax_main.set_title(title if title else '')
+    ax_main.set_ylabel('Intens. Norm.', fontsize=14)
+    ax_main.tick_params(axis='both', labelsize=11)
+    ax_main.grid(True, linestyle='--', linewidth=0.6, alpha=0.7)
+    ax_main.set_title(title if title else '', fontsize=20, pad=14)
 
-    # residual: plot zeros if not provided
-    res = np.zeros_like(x)
-    ax_res.plot(x, res, color='green')
-    ax_res.set_ylabel('Residuo')
-    ax_res.set_xlabel('Wave (cm⁻1)')
-    ax_res.grid(True, linestyle='--', linewidth=0.5)
+    # construir legenda no painel direito (ax_legend)
+    ax_legend.axis('off')
+    # coletar handles/labels do ax_main e apresentar numa box parecida
+    handles, labels = ax_main.get_legend_handles_labels()
+    # dedupe e ordenar: preferir mostrar 'Dados', 'Ajuste Total', 'Linha Base', 'Pico n'...
+    # se labels vazios, criar legendas manuais (fallback)
+    if not labels:
+        handles = []
+        labels = []
+    # desenha legenda como texto para poder controlar estilo
+    ax_legend.legend(handles=handles, labels=labels, loc='center left', frameon=True, fontsize=10)
 
+    # --- residual --- #
+    # tentar extrair fit_total do peaks_df (coluna 'fit_total') caso seu pipeline a retorne
+    residual = None
+    if peaks_df is not None and 'fit_total' in peaks_df.columns:
+        # peaks_df não tem fit por ponto geralmente, então pulamos
+        pass
+
+    # fallback: calc. residual se pipeline retornou fig_fit com linha 'Ajuste Total' (procurar por label)
+    if fig_fit is not None and hasattr(fig_fit, 'axes'):
+        # procura por linhas com label 'Ajuste Total' ou 'fit'
+        fit_y = None
+        for a in fig_fit.axes:
+            for line in a.get_lines():
+                lab = (line.get_label() or '').lower()
+                if 'ajuste' in lab or 'fit' in lab or 'ajuste total' in lab:
+                    fit_y = line.get_ydata()
+                    break
+            if fit_y is not None:
+                break
+        if fit_y is not None and len(fit_y) == len(x):
+            residual = y - np.array(fit_y)
+
+    # se não achou residual, desenhar resíduos próximos de zero (igual ao exemplo visual)
+    if residual is None:
+        residual = y - np.interp(x, x, y)  # zero-array (placeholder)
+        residual[:] = 0.0
+
+    ax_res.plot(x, residual, color='green', linewidth=1.2)
+    ax_res.axhline(0, color='black', linestyle='--', linewidth=1.2)
+    ax_res.set_ylabel('Residuo', fontsize=12)
+    ax_res.set_xlabel('Wave (cm⁻1)', fontsize=13)
+    ax_res.tick_params(axis='both', labelsize=11)
+    ax_res.grid(True, linestyle='--', linewidth=0.6, alpha=0.6)
+
+    plt.tight_layout()
     return fig
 
 
 def plot_groups_panel(peaks_df, title='Grupos Moleculares'):
-    # create a separate figure similar to your example: points colored by group, y arranged for readability
-    fig, ax = plt.subplots(figsize=(10, 2.0))
+    """
+    Plota painel com as faixas / marcadores por grupo molecular igual ao exemplo:
+    - agrupa por molecular_group e alinha pontos em linhas separadas
+    - adiciona cor-box e etiqueta do wavenumber
+    """
+    fig = plt.figure(figsize=(14, 2.5), dpi=100)
+    ax = fig.add_subplot(111)
+
     if peaks_df is None or peaks_df.empty:
-        ax.text(0.5, 0.5, 'Nenhum pico detectado', ha='center')
+        ax.text(0.5, 0.5, 'Nenhum pico detectado', ha='center', va='center')
+        ax.set_axis_off()
         return fig
 
-    # choose y positions by group to separate rows
-    unique_groups = peaks_df['molecular_group'].unique().tolist()
-    y_map = {g: i for i, g in enumerate(unique_groups[::-1])}  # reverse for nicer ordering
+    # ordens dos grupos mantidas como no MOLECULAR_MAP (se necessário ajustar a ordem manualmente)
+    unique_groups = list(dict.fromkeys(peaks_df['molecular_group'].tolist()))
+    # mapa y para cada grupo (several rows)
+    y_positions = {g: i for i, g in enumerate(unique_groups[::-1])}
+    cen_col = 'fit_cen' if 'fit_cen' in peaks_df.columns else 'peak_cm1'
 
-    xs = peaks_df['fit_cen'] if 'fit_cen' in peaks_df.columns else peaks_df['peak_cm1']
-    ys = peaks_df['molecular_group'].map(y_map)
-    colors = peaks_df['color'] if 'color' in peaks_df.columns else ['tab:gray'] * len(peaks_df)
+    xs = peaks_df[cen_col].astype(float)
+    ys = peaks_df['molecular_group'].map(y_positions).astype(float)
+    colors = peaks_df.get('color', ['tab:gray'] * len(peaks_df))
 
-    ax.scatter(xs, ys, s=80, c=colors, marker='o', edgecolors='k')
+    # pontos grandes com borda preta, preenchimento colorido
+    for xi, yi, ci in zip(xs, ys, colors):
+        ax.scatter(xi, yi, s=140, edgecolor='k', linewidth=0.7, facecolor=ci, zorder=5)
 
-    # annotate with label text to the right
-    for i, r in peaks_df.iterrows():
-        x = r.get('fit_cen', r.get('peak_cm1'))
-        y = y_map[r['molecular_group']]
-        lab = f"{float(x):.1f}"
-        ax.text(x + (max(xs)-min(xs)) * 0.005, y, f" {lab}", va='center', fontsize=8)
+    # rótulos numéricos ao lado direito do marcador (lembra as caixas pequenas do exemplo)
+    dx = (max(xs) - min(xs)) * 0.005
+    for xi, yi in zip(xs, ys):
+        lab = f"{float(xi):.1f}"
+        ax.text(xi + dx, yi, f" {lab}", va='center', fontsize=9)
 
-    ax.set_yticks(list(y_map.values()))
-    ax.set_yticklabels(list(y_map.keys()))
-    ax.set_xlabel('Wave (cm⁻1)')
-    ax.set_title(title)
-    ax.grid(False)
+    # ajustar eixos
+    ax.set_yticks(list(y_positions.values()))
+    ax.set_yticklabels(list(y_positions.keys()), fontsize=10)
+    ax.set_xlabel('Wave (cm⁻1)', fontsize=12)
     ax.set_xlim(min(xs) - 10, max(xs) + 10)
+    ax.set_ylim(-0.5, max(list(y_positions.values())) + 0.5)
+    ax.grid(False)
     plt.tight_layout()
     return fig
 
