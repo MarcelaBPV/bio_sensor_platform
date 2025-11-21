@@ -358,25 +358,45 @@ with tab_pat:
                     st.error(f"Erro ao cadastrar paciente: {e}")
 
   with c2:
-    st.subheader("Importar respostas do Google Forms (CSV)")
-    st.markdown("Faça o download das respostas no Google Forms (Respostas → Ícone de 3 pontos → Fazer download das respostas (.csv)) e envie aqui.")
-    forms_csv = st.file_uploader("CSV do Google Forms", type=["csv"])
-    if forms_csv:
-        if st.button("Importar CSV para Supabase"):
+    st.subheader("Importar respostas do Google Forms (XLSX ou CSV)")
+    st.markdown("""
+    Faça o download das respostas do formulário (no Google Sheets ou Google Forms)  
+    e envie o arquivo **.xlsx** ou **.csv** aqui.
+    """)
+    
+    forms_file = st.file_uploader(
+        "Arquivo de respostas do formulário (.xlsx ou .csv)",
+        type=["xlsx", "csv"]
+    )
+
+    if forms_file:
+        if st.button("Importar arquivo para Supabase"):
             if not supabase:
                 st.error("Supabase não configurado.")
             else:
                 try:
                     with st.spinner("Importando..."):
-                        df = pd.read_csv(forms_csv)
+                        # Detecta o tipo de arquivo
+                        filename = forms_file.name.lower()
+                        if filename.endswith(".csv"):
+                            df = pd.read_csv(forms_file)
+                        else:
+                            # XLSX (caso do seu arquivo do questionário)
+                            df = pd.read_excel(forms_file)
+
                         imported = []
+
                         for _, row in df.iterrows():
+                            # Tenta detectar as colunas de Nome, Email e CPF automaticamente
                             colname = next((c for c in df.columns if 'nome' in c.lower()), None)
                             colemail = next((c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()), None)
                             colcpf = next((c for c in df.columns if 'cpf' in c.lower()), None)
+
                             name = str(row[colname]) if colname and pd.notna(row[colname]) else None
                             email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
                             cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
+
+                            # Verifica se já existe paciente com mesmo email ou CPF
                             existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
                             if existing:
                                 patient_record = existing
@@ -388,20 +408,22 @@ with tab_pat:
                                     "created_at": datetime.utcnow().isoformat()
                                 }
                                 patient_record = create_patient_record(patient_obj)
+
+                            # Salva toda a linha do formulário em metadata (inclusive idade, sexo, etc.)
                             sample_obj = {
                                 "patient_id": patient_record["id"],
                                 "sample_name": f"FormResponse_{patient_record['id']}_{int(time.time())}",
-                                "description": "Importado via Google Forms",
+                                "description": "Importado via formulário (XLSX/CSV)",
                                 "collection_date": None,
                                 "metadata": {str(k): (v if pd.notna(v) else None) for k, v in row.items()},
                                 "substrate": None
                             }
                             create_sample_record(sample_obj)
                             imported.append(patient_record["id"])
+
                     st.success(f"Importadas {len(imported)} respostas.")
                 except Exception as e:
                     st.error(f"Erro na importação: {e}")
-
 
 # ---------------------------
 # Aba 2: Espectrometria Raman
