@@ -398,101 +398,115 @@ with tab_pat:
                 except Exception as e:
                     st.error(f"Erro ao cadastrar paciente: {e}")
 
-    with c2:
-        st.subheader("Importar respostas do Google Forms (XLSX ou CSV)")
-        st.markdown(
-            """
-            Faça o download das respostas do formulário (no Google Sheets ou Google Forms)  
-            e envie o arquivo **.xlsx** ou **.csv** aqui.
-            """
-        )
+   with c2:
+    st.subheader("Importar respostas do formulário (XLSX/CSV em lotes de 10)")
+    st.markdown("Envie um arquivo .xlsx ou .csv contendo todas as respostas do Google Forms.")
 
-        forms_file = st.file_uploader(
-            "Arquivo de respostas do formulário (.xlsx ou .csv)",
-            type=["xlsx", "csv"]
-        )
+    forms_file = st.file_uploader(
+        "Arquivo (.xlsx ou .csv)",
+        type=["xlsx", "csv"]
+    )
 
-        if forms_file:
-            if st.button("Importar arquivo para Supabase"):
-                if not supabase:
-                    st.error("Supabase não configurado.")
-                else:
-                    try:
-                        with st.spinner("Importando..."):
-                            filename = forms_file.name.lower()
-                            if filename.endswith(".csv"):
-                                df = pd.read_csv(forms_file)
+    if forms_file:
+        if st.button("Importar respostas em lotes de 10"):
+            if not supabase:
+                st.error("Supabase não configurado.")
+            else:
+                try:
+                    with st.spinner("Lendo arquivo..."):
+
+                        filename = forms_file.name.lower()
+                        if filename.endswith(".csv"):
+                            df = pd.read_csv(forms_file)
+                        else:
+                            df = pd.read_excel(forms_file)
+
+                    # Converte dataframe para lista de dicionários por linha
+                    rows = list(df.to_dict(orient="records"))
+
+                    total = len(rows)
+                    st.info(f"Total de respostas: **{total}**")
+
+                    progress = st.progress(0)
+                    imported_count = 0
+                    batch_index = 0
+
+                    # Processar em lotes de 10
+                    for batch in chunk_list(rows, chunk_size=10):
+                        batch_index += 1
+                        st.write(f"📦 Processando lote {batch_index} com {len(batch)} pessoas...")
+
+                        for row in batch:
+
+                            # detectar colunas
+                            row_lower = {k.lower(): k for k in row.keys()}
+                            colname = next((row_lower[c] for c in row_lower if "nome" in c), None)
+                            colemail = next((row_lower[c] for c in row_lower if "email" in c or "e-mail" in c), None)
+                            colcpf = next((row_lower[c] for c in row_lower if "cpf" in c), None)
+                            col_part = next((row_lower[c] for c in row_lower if "particip" in c), None)
+
+                            name = row.get(colname)
+                            email = row.get(colemail)
+                            cpf = row.get(colcpf)
+                            participant_code = row.get(col_part)
+
+                            # limpar código ex: "5.0"
+                            if isinstance(participant_code, (int,float)):
+                                participant_code = str(int(participant_code))
+                            if isinstance(participant_code, str) and participant_code.endswith(".0"):
+                                participant_code = participant_code[:-2]
+
+                            # nome para salvar
+                            if name and participant_code:
+                                display_name = f"{participant_code} - {name}"
+                            elif name:
+                                display_name = name
+                            elif participant_code:
+                                display_name = f"Participante {participant_code}"
                             else:
-                                df = pd.read_excel(forms_file)
+                                display_name = "Desconhecido"
 
-                            imported = []
-
-                            for _, row in df.iterrows():
-                                colname = next((c for c in df.columns if 'nome' in c.lower()), None)
-                                colemail = next(
-                                    (c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()),
-                                    None
-                                )
-                                colcpf = next((c for c in df.columns if 'cpf' in c.lower()), None)
-                                col_part = next((c for c in df.columns if 'particip' in c.lower()), None)
-
-                                name = str(row[colname]) if colname and pd.notna(row[colname]) else None
-                                email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
-                                cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
-
-                                participant_code = None
-                                if col_part and pd.notna(row[col_part]):
-                                    participant_raw = str(row[col_part]).strip()
-                                    if participant_raw.endswith(".0"):
-                                        participant_raw = participant_raw[:-2]
-                                    participant_code = participant_raw
-
-                                if name and participant_code:
-                                    full_name_field = f"{participant_code} - {name}"
-                                elif name:
-                                    full_name_field = name
-                                elif participant_code:
-                                    full_name_field = f"Participante {participant_code}"
-                                else:
-                                    full_name_field = "Desconhecido"
-
-                                existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
-                                if existing:
-                                    patient_record = existing
-                                else:
-                                    patient_obj = {
-                                        "full_name": full_name_field,
-                                        "email": email,
-                                        "cpf": cpf,
-                                        "created_at": datetime.utcnow().isoformat()
-                                    }
-                                    patient_record = create_patient_record(patient_obj)
-
-                                if participant_code:
-                                    sample_name = f"{participant_code}_Form"
-                                else:
-                                    sample_name = f"FormResponse_{patient_record['id']}_{int(time.time())}"
-
-                                metadata_dict = {
-                                    str(k): (v if pd.notna(v) else None) for k, v in row.items()
+                            # verificar existência
+                            existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
+                            if existing:
+                                patient_record = existing
+                            else:
+                                patient_obj = {
+                                    "full_name": display_name,
+                                    "email": email,
+                                    "cpf": cpf,
+                                    "created_at": datetime.utcnow().isoformat()
                                 }
-                                if participant_code:
-                                    metadata_dict["participant_code"] = participant_code
+                                patient_record = create_patient_record(patient_obj)
 
-                                sample_obj = {
-                                    "patient_id": patient_record["id"],
-                                    "sample_name": sample_name,
-                                    "description": "Importado via formulário (XLSX/CSV)",
-                                    "collection_date": None,
-                                    "metadata": metadata_dict,
-                                    "substrate": None
-                                }
-                                create_sample_record(sample_obj)
-                                imported.append(patient_record["id"])
+                            # criar amostra
+                            if participant_code:
+                                sample_name = f"{participant_code}_Form"
+                            else:
+                                sample_name = f"Form_{patient_record['id']}"
 
-                        st.success(f"Importadas {len(imported)} respostas.")
-                    except Exception as e:
-                        st.error(f"Erro na importação: {e}")
+                            metadata_dict = {str(k): json_safe(v) for k, v in row.items()}
+                            if participant_code:
+                                metadata_dict["participant_code"] = participant_code
+
+                            sample_obj = {
+                                "patient_id": patient_record["id"],
+                                "sample_name": sample_name,
+                                "description": "Importado via formulário",
+                                "collection_date": None,
+                                "metadata": metadata_dict,
+                                "substrate": None
+                            }
+                            create_sample_record(sample_obj)
+                            imported_count += 1
+
+                        # Atualizar progresso
+                        progress.progress(min(imported_count / total, 1.0))
+
+                    st.success(f"🎉 Importação concluída! Total importado: **{imported_count} pessoas**")
+
+                except Exception as e:
+                    st.error(f"Erro na importação: {e}")
 
 # ---------------------------
 # Aba 2: Espectrometria Raman
