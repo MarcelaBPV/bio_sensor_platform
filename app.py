@@ -357,13 +357,13 @@ with tab_pat:
                 except Exception as e:
                     st.error(f"Erro ao cadastrar paciente: {e}")
 
-  with c2:
+with c2:
     st.subheader("Importar respostas do Google Forms (XLSX ou CSV)")
     st.markdown("""
     Faça o download das respostas do formulário (no Google Sheets ou Google Forms)  
     e envie o arquivo **.xlsx** ou **.csv** aqui.
     """)
-    
+
     forms_file = st.file_uploader(
         "Arquivo de respostas do formulário (.xlsx ou .csv)",
         type=["xlsx", "csv"]
@@ -381,20 +381,39 @@ with tab_pat:
                         if filename.endswith(".csv"):
                             df = pd.read_csv(forms_file)
                         else:
-                            # XLSX (caso do seu arquivo do questionário)
                             df = pd.read_excel(forms_file)
 
                         imported = []
 
                         for _, row in df.iterrows():
-                            # Tenta detectar as colunas de Nome, Email e CPF automaticamente
+                            # Detectar colunas principais
                             colname = next((c for c in df.columns if 'nome' in c.lower()), None)
                             colemail = next((c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()), None)
                             colcpf = next((c for c in df.columns if 'cpf' in c.lower()), None)
+                            col_part = next((c for c in df.columns if 'particip' in c.lower()), None)
 
                             name = str(row[colname]) if colname and pd.notna(row[colname]) else None
                             email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
                             cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
+
+                            # Código do participante (P1, 1, etc.)
+                            participant_code = None
+                            if col_part and pd.notna(row[col_part]):
+                                participant_raw = str(row[col_part]).strip()
+                                # limpa coisas tipo "1.0"
+                                if participant_raw.endswith(".0"):
+                                    participant_raw = participant_raw[:-2]
+                                participant_code = participant_raw
+
+                            # Nome que vai aparecer na lista de pacientes
+                            if name and participant_code:
+                                full_name_field = f"{participant_code} - {name}"
+                            elif name:
+                                full_name_field = name
+                            elif participant_code:
+                                full_name_field = f"Participante {participant_code}"
+                            else:
+                                full_name_field = "Desconhecido"
 
                             # Verifica se já existe paciente com mesmo email ou CPF
                             existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
@@ -402,20 +421,30 @@ with tab_pat:
                                 patient_record = existing
                             else:
                                 patient_obj = {
-                                    "full_name": name or "Desconhecido",
+                                    "full_name": full_name_field,
                                     "email": email,
                                     "cpf": cpf,
                                     "created_at": datetime.utcnow().isoformat()
                                 }
                                 patient_record = create_patient_record(patient_obj)
 
-                            # Salva toda a linha do formulário em metadata (inclusive idade, sexo, etc.)
+                            # Nome da amostra já amarrado ao participante (para você usar depois na aba 2)
+                            if participant_code:
+                                sample_name = f"{participant_code}_Form"
+                            else:
+                                sample_name = f"FormResponse_{patient_record['id']}_{int(time.time())}"
+
+                            # Salva toda a linha do formulário em metadata + participant_code
+                            metadata_dict = {str(k): (v if pd.notna(v) else None) for k, v in row.items()}
+                            if participant_code:
+                                metadata_dict["participant_code"] = participant_code
+
                             sample_obj = {
                                 "patient_id": patient_record["id"],
-                                "sample_name": f"FormResponse_{patient_record['id']}_{int(time.time())}",
+                                "sample_name": sample_name,
                                 "description": "Importado via formulário (XLSX/CSV)",
                                 "collection_date": None,
-                                "metadata": {str(k): (v if pd.notna(v) else None) for k, v in row.items()},
+                                "metadata": metadata_dict,
                                 "substrate": None
                             }
                             create_sample_record(sample_obj)
