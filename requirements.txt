@@ -8,3 +8,4 @@ supabase>=1.0.0
 ramanchada2>=0.1.0
 python-dotenv>=1.0.0
 typing-extensions>=4.5.0
+openpyxl
