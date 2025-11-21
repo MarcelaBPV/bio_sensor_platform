@@ -151,10 +151,26 @@ def insert_peaks_df(df: pd.DataFrame, measurement_id: int):
 
 
 def get_patients_list(limit: int = 500) -> List[Dict]:
+    """
+    Busca pacientes e ordena localmente pelo número antes do ' - ' no full_name.
+    Ex: '1 - Murilo', '2 - Gustavo', etc.
+    Quem não tiver número vai para o final.
+    """
     if not supabase:
         return []
-    r = supabase.table("patients").select("*").order("created_at", desc=True).limit(limit).execute()
-    return r.data or []
+
+    r = supabase.table("patients").select("*").limit(limit).execute()
+    data = r.data or []
+
+    def extract_number(name):
+        try:
+            prefix = str(name).split("-")[0].strip()
+            return int(prefix)
+        except Exception:
+            return 999999  # sem número, joga pro final
+
+    data.sort(key=lambda x: extract_number(x.get("full_name", "")))
+    return data
 
 
 def get_samples_for_patient(patient_id: int) -> List[Dict]:
