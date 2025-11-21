@@ -85,9 +85,13 @@ def create_patient_record(patient_obj: Dict) -> Dict:
     if not supabase:
         raise RuntimeError("Supabase não configurado.")
     res = supabase.table("patients").insert(patient_obj).execute()
-    if res.error:
-        raise RuntimeError(res.error.message if hasattr(res.error,'message') else res.error)
-    return res.data[0]
+
+# O novo client NÃO usa mais res.error
+if not res.data:
+    raise RuntimeError("Erro ao inserir paciente no Supabase.")
+
+return res.data[0]
+
 
 def find_patient_by_email_or_cpf(email: Optional[str], cpf: Optional[str]) -> Optional[Dict]:
     if not supabase:
