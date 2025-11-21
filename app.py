@@ -745,6 +745,162 @@ with tab_raman:
                 st.success(f"{len(results)} arquivos salvos no Supabase.")
                 st.dataframe(pd.DataFrame(results))
 
+        st.markdown("---")
+    st.subheader("Visualizar ensaios Raman já salvos na plataforma")
+
+    if not supabase:
+        st.info("Conecte ao Supabase para visualizar os ensaios salvos.")
+    else:
+        # 1) Selecionar paciente
+        patients_vis = get_patients_list(200)
+        if not patients_vis:
+            st.info("Nenhum paciente cadastrado ainda.")
+        else:
+            patient_map_vis = {
+                f"{p['id']} - {p.get('full_name', 'Sem nome')}": p["id"]
+                for p in patients_vis
+            }
+            sel_patient_label_vis = st.selectbox(
+                "Paciente (para visualizar ensaios salvos)",
+                list(patient_map_vis.keys()),
+                key="vis_patient"
+            )
+            sel_patient_id_vis = patient_map_vis[sel_patient_label_vis]
+
+            # 2) Selecionar amostra desse paciente
+            samples_vis = get_samples_for_patient(sel_patient_id_vis)
+            if not samples_vis:
+                st.info("Este paciente ainda não possui amostras cadastradas.")
+            else:
+                sample_map_vis = {
+                    f"{s['id']} - {s.get('sample_name', 'Sem nome de amostra')}": s["id"]
+                    for s in samples_vis
+                }
+                sel_sample_label_vis = st.selectbox(
+                    "Amostra",
+                    list(sample_map_vis.keys()),
+                    key="vis_sample"
+                )
+                sel_sample_id_vis = sample_map_vis[sel_sample_label_vis]
+
+                # 3) Selecionar medição (ensaio) dessa amostra
+                try:
+                    meas_res_vis = supabase.table("measurements")\
+                        .select("*")\
+                        .eq("sample_id", sel_sample_id_vis)\
+                        .order("created_at", desc=True)\
+                        .execute()
+                    meas_list_vis = meas_res_vis.data or []
+                except Exception as e:
+                    meas_list_vis = []
+                    st.error(f"Erro ao buscar medições: {e}")
+
+                if not meas_list_vis:
+                    st.info("Nenhum ensaio Raman cadastrado para esta amostra.")
+                else:
+                    meas_map_vis = {}
+                    for m in meas_list_vis:
+                        tipo = m.get("type", "sem tipo")
+                        created = m.get("created_at", "") or ""
+                        created_short = created[:19]  # YYYY-MM-DDTHH:MM:SS
+                        label = f"{m['id']} - {tipo} - {created_short}"
+                        meas_map_vis[label] = m["id"]
+
+                    sel_meas_label_vis = st.selectbox(
+                        "Ensaio (measurement)",
+                        list(meas_map_vis.keys()),
+                        key="vis_meas"
+                    )
+                    sel_meas_id_vis = meas_map_vis[sel_meas_label_vis]
+
+                    # 4) Buscar espectro e picos no Supabase
+                    try:
+                        spec_res = supabase.table("raman_spectra")\
+                            .select("wavenumber_cm1,intensity_a")\
+                            .eq("measurement_id", sel_meas_id_vis)\
+                            .order("wavenumber_cm1", desc=False)\
+                            .execute()
+                        spec_data = spec_res.data or []
+                    except Exception as e:
+                        spec_data = []
+                        st.error(f"Erro ao buscar espectro: {e}")
+
+                    try:
+                        peaks_res = supabase.table("raman_peaks")\
+                            .select("*")\
+                            .eq("measurement_id", sel_meas_id_vis)\
+                            .execute()
+                        peaks_data = peaks_res.data or []
+                    except Exception as e:
+                        peaks_data = []
+                        st.error(f"Erro ao buscar picos: {e}")
+
+                    if not spec_data:
+                        st.warning("Não há espectro salvo para este ensaio.")
+                    else:
+                        df_spec_vis = pd.DataFrame(spec_data)
+                        # garante nomes corretos
+                        if "wavenumber_cm1" not in df_spec_vis.columns or "intensity_a" not in df_spec_vis.columns:
+                            st.error("Espectro salvo em formato inesperado (faltam colunas wavenumber_cm1/intensity_a).")
+                        else:
+                            x_vis = df_spec_vis["wavenumber_cm1"].astype(float).values
+                            y_vis = df_spec_vis["intensity_a"].astype(float).values
+
+                            if peaks_data:
+                                peaks_df_vis = pd.DataFrame(peaks_data)
+                            else:
+                                peaks_df_vis = pd.DataFrame()
+
+                            # 5) Plotar gráfico + tabela de picos para esse ensaio
+                            st.markdown("### 🔍 Visualização do ensaio selecionado")
+
+                            fig_vis = plot_main_and_residual(
+                                x_vis,
+                                y_vis,
+                                peaks_df_vis if not peaks_df_vis.empty else None,
+                                title=f"Paciente: {sel_patient_label_vis} | {sel_sample_label_vis} | {sel_meas_label_vis}"
+                            )
+                            st.pyplot(fig_vis)
+
+                            # 6) Tabela de picos correspondentes à amostra/ensaio escolhido
+                            if peaks_df_vis is not None and not peaks_df_vis.empty:
+                                st.subheader("Tabela de picos deste ensaio")
+
+                                # detectar colunas de centro e altura
+                                cen_col = None
+                                if "fit_cen" in peaks_df_vis.columns:
+                                    cen_col = "fit_cen"
+                                elif "peak_cm1" in peaks_df_vis.columns:
+                                    cen_col = "peak_cm1"
+
+                                height_col = None
+                                if "fit_height" in peaks_df_vis.columns:
+                                    height_col = "fit_height"
+                                elif "height" in peaks_df_vis.columns:
+                                    height_col = "height"
+
+                                cols_to_show = []
+                                if cen_col:
+                                    cols_to_show.append(cen_col)
+                                if height_col:
+                                    cols_to_show.append(height_col)
+                                if "molecular_group" in peaks_df_vis.columns:
+                                    cols_to_show.append("molecular_group")
+
+                                if cols_to_show:
+                                    display_df_vis = peaks_df_vis[cols_to_show].copy()
+                                    rename_map = {}
+                                    if cen_col:
+                                        rename_map[cen_col] = "wavenumber_cm1"
+                                    if height_col:
+                                        rename_map[height_col] = "intensity"
+                                    display_df_vis = display_df_vis.rename(columns=rename_map)
+                                    st.dataframe(display_df_vis)
+                                else:
+                                    st.info("Picos salvos sem colunas padrão (fit_cen/peak_cm1, fit_height/height).")
+                            else:
+                                st.info("Nenhum pico salvo para este ensaio.")
+
     st.markdown("---")
     st.subheader("Ensaios cadastrados (amostra selecionada)")
     if sel_sample_id and supabase:
