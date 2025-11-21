@@ -3,7 +3,7 @@
 """
 Bio Sensor App - Streamlit
 Três abas:
-1) Pacientes & Import Forms (inclui import ZIP em lotes)
+1) Pacientes & Import Forms (inclui import XLSX/CSV em lote)
 2) Espectrometria Raman (upload individual e upload de até 10 amostras de uma vez)
 3) Otimização (IA)
 
@@ -23,7 +23,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from io import BytesIO
 
-# ML
+# ML (reservado para uso futuro)
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -64,7 +64,7 @@ else:
     st.warning("⚠️ Coloque SUPABASE_URL e SUPABASE_KEY em st.secrets para habilitar salvamentos no banco.")
 
 # ---------------------------
-# Utilidades Supabase (usam supabase client)
+# Utilidades Supabase
 # ---------------------------
 def safe_insert(table: str, records: List[Dict]):
     if not supabase:
@@ -354,6 +354,25 @@ def buf_from_file(f):
         return BytesIO(b) if not isinstance(b, BytesIO) else b
     return None
 
+
+def json_safe(v):
+    """Converte valores Pandas/Numpy para tipos compatíveis com JSON (metadata)."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return v.isoformat()
+
+    if isinstance(v, np.generic):
+        return v.item()
+
+    return v
+
 # ---------------------------
 # UI: abas
 # ---------------------------
@@ -368,6 +387,7 @@ with tab_pat:
     st.header("1️⃣ Pacientes — Cadastro e Importação do Google Forms")
     c1, c2 = st.columns([1, 2])
 
+    # --- Cadastro manual ---
     with c1:
         st.subheader("Cadastrar paciente manualmente")
         with st.form("form_patient"):
@@ -398,13 +418,14 @@ with tab_pat:
                 except Exception as e:
                     st.error(f"Erro ao cadastrar paciente: {e}")
 
+    # --- Importar XLSX/CSV do formulário ---
     with c2:
         st.subheader("Importar respostas do Google Forms (XLSX ou CSV)")
         st.markdown(
             """
             Faça o download das respostas do formulário (no Google Sheets ou Google Forms)  
-            e envie o arquivo **.xlsx** ou **.csv** aqui.
-            (Se você já limitar para 10 linhas, ele importa exatamente essas 10 pessoas.)
+            e envie o arquivo **.xlsx** ou **.csv** aqui.  
+            Se você limitar o arquivo a 10 respostas, ele importará essas 10 pessoas de uma vez.
             """
         )
 
@@ -429,7 +450,6 @@ with tab_pat:
                         imported = 0
 
                         for _, row in df.iterrows():
-
                             # detectar colunas por nome aproximado
                             colname = next((c for c in df.columns if 'nome' in c.lower()), None)
                             colemail = next((c for c in df.columns if 'e-mail' in c.lower() or 'email' in c.lower()), None)
@@ -440,7 +460,7 @@ with tab_pat:
                             email = str(row[colemail]) if colemail and pd.notna(row[colemail]) else None
                             cpf = str(row[colcpf]) if colcpf and pd.notna(row[colcpf]) else None
 
-                            # Código do participante (P1, 1, etc.)
+                            # Código do participante
                             participant_code = None
                             if col_part and pd.notna(row[col_part]):
                                 participant_raw = row[col_part]
@@ -451,7 +471,7 @@ with tab_pat:
                                 if participant_code.endswith(".0"):
                                     participant_code = participant_code[:-2]
 
-                            # Nome para salvar no banco
+                            # Nome para salvar
                             if name and participant_code:
                                 full_name_field = f"{participant_code} - {name}"
                             elif name:
@@ -461,7 +481,7 @@ with tab_pat:
                             else:
                                 full_name_field = "Desconhecido"
 
-                            # Checa se já existe
+                            # Verifica se já existe paciente
                             existing = find_patient_by_email_or_cpf(email=email, cpf=cpf)
                             if existing:
                                 patient_record = existing
@@ -478,18 +498,17 @@ with tab_pat:
                             if participant_code:
                                 sample_name = f"{participant_code}_Form"
                             else:
-                                sample_name = f"Form_{patient_record['id']}"
+                                sample_name = f"FormResponse_{patient_record['id']}_{int(time.time())}"
 
                             # Metadata JSON-safe
                             metadata_dict = {str(k): json_safe(v) for k, v in row.items()}
                             if participant_code:
                                 metadata_dict["participant_code"] = participant_code
 
-                            # Criar amostra
                             sample_obj = {
                                 "patient_id": patient_record["id"],
                                 "sample_name": sample_name,
-                                "description": "Importado via formulário",
+                                "description": "Importado via formulário (XLSX/CSV)",
                                 "collection_date": None,
                                 "metadata": metadata_dict,
                                 "substrate": None
@@ -498,10 +517,22 @@ with tab_pat:
                             imported += 1
 
                         st.success(f"Importadas {imported} respostas do formulário para pacientes/amostras.")
-
                     except Exception as e:
                         st.error(f"Erro na importação: {e}")
 
+    st.markdown("---")
+    st.subheader("Pacientes cadastrados (últimos 200)")
+    if supabase:
+        try:
+            patients_list = get_patients_list(200)
+            if patients_list:
+                st.dataframe(pd.DataFrame(patients_list))
+            else:
+                st.info("Nenhum paciente cadastrado ainda.")
+        except Exception as e:
+            st.error(f"Erro listando pacientes: {e}")
+    else:
+        st.info("Conecte ao Supabase para ver a lista de pacientes.")
 
 # ---------------------------
 # Aba 2: Espectrometria Raman
@@ -529,9 +560,10 @@ with tab_raman:
                 patient_samples = samp_res.data or []
             else:
                 patient_samples = []
-            samp_map = {
-                f"{s['id']} - {s['sample_name']}": s["id"] for s in patient_samples
-            } if patient_samples else {}
+            samp_map = (
+                {f"{s['id']} - {s['sample_name']}": s["id"] for s in patient_samples}
+                if patient_samples else {}
+            )
             sel_sample_label = st.selectbox(
                 "Amostra (opcional, para salvar)", [""] + list(samp_map.keys())
             )
@@ -704,6 +736,7 @@ with tab_raman:
                                 st.error(
                                     "Selecione um paciente ou importe o Google Forms antes de salvar."
                                 )
+                                sample_id_to_use = None
                             else:
                                 sample_obj = {
                                     "patient_id": sel_patient_id,
@@ -720,15 +753,16 @@ with tab_raman:
                         else:
                             sample_id_to_use = sel_sample_id
 
-                        meas_id = create_measurement_record(
-                            sample_id_to_use, "raman", operator=None, notes="Process via app"
-                        )
-                        df_to_save = pd.DataFrame(
-                            {"wavenumber_cm1": x, "intensity_a": y}
-                        )
-                        insert_raman_spectrum_df(df_to_save, meas_id)
-                        insert_peaks_df(peaks_df, meas_id)
-                        st.success(f"✅ Dados salvos. measurement_id = {meas_id}")
+                        if sample_id_to_use is not None:
+                            meas_id = create_measurement_record(
+                                sample_id_to_use, "raman", operator=None, notes="Process via app"
+                            )
+                            df_to_save = pd.DataFrame(
+                                {"wavenumber_cm1": x, "intensity_a": y}
+                            )
+                            insert_raman_spectrum_df(df_to_save, meas_id)
+                            insert_peaks_df(peaks_df, meas_id)
+                            st.success(f"✅ Dados salvos. measurement_id = {meas_id}")
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}")
 
@@ -1063,7 +1097,7 @@ with tab_raman:
 
     st.markdown("---")
     st.subheader("Ensaios cadastrados (amostra selecionada)")
-    if sel_sample_id and supabase:
+    if 'sel_sample_id' in locals() and sel_sample_id and supabase:
         try:
             df_meas = pd.DataFrame(
                 supabase.table("measurements")
@@ -1187,7 +1221,7 @@ with tab_ai:
             st.error(f"Erro ao analisar arquivo: {e}")
 
 # ---------------------------
-# Footer: notas de segurança e propriedade intelectual
+# Footer
 # ---------------------------
 st.markdown("---")
 st.caption(
