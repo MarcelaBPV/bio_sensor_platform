@@ -35,11 +35,15 @@ except Exception:
     create_client = None
     Client = None
 
-# Pipeline (seu módulo local)
+# Pipeline (módulo local) - tenta v2 primeiro, depois o antigo
+process_raman_pipeline = None
 try:
-    from raman_processing import process_raman_pipeline
+    from raman_processing_v2 import process_raman_pipeline
 except Exception:
-    process_raman_pipeline = None
+    try:
+        from raman_processing import process_raman_pipeline
+    except Exception:
+        process_raman_pipeline = None
 
 # ---------------------------
 # Config Streamlit
@@ -557,7 +561,7 @@ with tab_raman:
     st.header("2️⃣ Espectrometria Raman — processamento e anotação")
 
     if process_raman_pipeline is None:
-        st.error("Módulo raman_processing.py não encontrado ou com erro. Coloque no mesmo diretório.")
+        st.error("Módulo raman_processing_v2.py / raman_processing.py não encontrado ou com erro. Coloque no mesmo diretório.")
 
     patients = get_patients_list(200) if supabase else []
     patient_map = {f"{p['id']} - {p['full_name']}": p["id"] for p in patients} if patients else {}
@@ -790,7 +794,7 @@ with tab_raman:
         if len(batch_files) > 10:
             st.warning("Você enviou mais de 10 arquivos — por favor selecione até 10 por vez.")
         elif process_raman_pipeline is None:
-            st.error("Módulo raman_processing.py não encontrado — não é possível processar.")
+            st.error("Módulo raman_processing_v2.py / raman_processing.py não encontrado — não é possível processar.")
         else:
             substrate_bytes = BytesIO(uploaded_substrate.read()) if uploaded_substrate else None
             total = len(batch_files)
