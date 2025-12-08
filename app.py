@@ -276,8 +276,10 @@ def annotate_molecular_groups(
         return GROUP_COLORS.get(g, "tab:gray")
 
     peaks_df["color"] = peaks_df["molecular_group"].map(_color_map)
-    peaks_df["is_substrate"] = peaks_df["molecular_group"].str.startswith("Substrato:")
+    #  linha corrigida
+    peaks_df["is_substrate"] = peaks_df["molecular_group"].astype(str).str.startswith("Substrato:")
     return peaks_df
+
 
 # ---------------------------
 # Plot helpers
