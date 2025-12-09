@@ -43,14 +43,14 @@ Desenvolvido em Python, totalmente modular e compatível com **deploy via GitHub
 
 ## Estrutura do Projeto
 
-bio_sensor_app/
+bio_sensor_platform/
 │
-├── app.py                   
-├── raman_processing_v2.py     
-├── requirements.txt            
-├── README.md                   
-└── utils/
-    └── batch_import.py    
+├─ app.py                 # Interface Streamlit (3 abas)
+├─ raman_processing.py    # Processamento Raman
+├─ ml_otimizador.py       # Machine Learning / Random Forest
+├─ requirements.txt
+└─ README.md
+   
 
 ## Licença
 
