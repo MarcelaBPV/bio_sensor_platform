@@ -37,7 +37,13 @@ uploaded_file = st.sidebar.file_uploader(
 
 st.sidebar.header("2. Pré-processamento")
 smooth = st.sidebar.checkbox("Suavizar (Savitzky-Golay)", value=True)
-window_length = st.sidebar.slider("Janela suavização", min_value=5, max_value=51, step=2, value= nine)
+window_length = st.sidebar.slider(
+    "Janela suavização",
+    min_value=5,
+    max_value=51,
+    step=2,
+    value=9
+)
 polyorder = st.sidebar.slider("Ordem do polinômio", min_value=2, max_value=5, value=3)
 normalize = st.sidebar.checkbox("Normalizar 0–1", value=True)
 
