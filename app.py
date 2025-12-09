@@ -1,7 +1,7 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-BioRaman - Plataforma experimental para análise de espectros Raman,
+BioRaman / BioSensor - Plataforma experimental para análise de espectros Raman,
 mapeamento de grupos moleculares e correlação com padrões associados a doenças.
 
 ⚠ Uso exclusivo em pesquisa. Não utilizar para diagnóstico clínico.
@@ -20,11 +20,6 @@ from raman_processing import (
     detect_peaks,
     map_peaks_to_molecular_groups,
     infer_diseases,
-)
-
-from ml_otimizador import (
-    run_ml_pipeline_from_peaks_table,
-    MLConfig,
 )
 
 # ---------------------------------------------------------------------
@@ -56,7 +51,7 @@ def aba_cadastro():
     )
 
     if uploaded is None:
-        st.info("Faça upload do arquivo de respostas do Google Forms para iniciar o cadastro.")
+        st.info("📂 Faça upload do arquivo de respostas do Google Forms para iniciar o cadastro.")
         return
 
     # Leitura robusta
@@ -83,8 +78,10 @@ def aba_cadastro():
     # Salva em sessão
     st.session_state["patients_df"] = df
 
-    st.success("Participantes carregados e IDs gerados. "
-               "Esses IDs poderão ser associados aos espectros na Aba 2.")
+    st.success(
+        "✅ Participantes carregados e IDs gerados. "
+        "Esses IDs poderão ser associados aos espectros na Aba 2."
+    )
 
 
 # =====================================================================
@@ -105,8 +102,10 @@ def aba_raman():
         )
         st.caption("Este espectro será associado ao patient_id selecionado.")
     else:
-        st.warning("Nenhum participante cadastrado ainda (Aba 1). "
-                   "Você pode continuar, mas os espectros não terão associação a pessoas.")
+        st.warning(
+            "Nenhum participante cadastrado ainda (Aba 1). "
+            "Você pode continuar, mas os espectros não terão associação a pessoas."
+        )
         selected_patient = None
 
     # ID da amostra (para ML)
@@ -175,7 +174,7 @@ def aba_raman():
 
     # ---------------- Corpo principal ----------------
     if uploaded_file is None:
-        st.info(" Faça o upload de um espectro para começar a análise Raman.")
+        st.info("📂 Faça o upload de um espectro para começar a análise Raman.")
         return
 
     # 1) Carregamento do espectro
@@ -260,7 +259,7 @@ def aba_raman():
             st.dataframe(df_display, use_container_width=True)
 
             # Botão para salvar a tabela de picos para uso na Aba 3 (ML)
-            if st.button(" Salvar picos desta amostra para ML (Aba 3)"):
+            if st.button("💾 Salvar picos desta amostra para ML (Aba 3)"):
                 if "peaks_table" in st.session_state and st.session_state["peaks_table"] is not None:
                     st.session_state["peaks_table"] = pd.concat(
                         [st.session_state["peaks_table"], df_peaks],
@@ -303,18 +302,36 @@ def aba_raman():
 def aba_otimizacao():
     st.header("Aba 3 — Otimização (Random Forest)")
 
+    # Import atrasado: não quebra a app se o arquivo não existir
+    try:
+        from ml_otimizador import (
+            run_ml_pipeline_from_peaks_table,
+            MLConfig,
+        )
+    except ModuleNotFoundError:
+        st.error(
+            "❌ O módulo 'ml_otimizador.py' não foi encontrado.\n\n"
+            "Crie o arquivo 'ml_otimizador.py' na mesma pasta do app.py "
+            "com o código do otimizador de ML."
+        )
+        return
+
     peaks_df = st.session_state.get("peaks_table", None)
     patients_df = st.session_state.get("patients_df", None)
 
     if peaks_df is None or len(peaks_df) == 0:
-        st.info("⚠ Ainda não há picos salvos. "
-                "Use a Aba 2 para detectar picos e clicar em "
-                "'Salvar picos desta amostra para ML'.")
+        st.info(
+            "⚠ Ainda não há picos salvos. "
+            "Use a Aba 2 para detectar picos e clicar em "
+            "'Salvar picos desta amostra para ML'."
+        )
         return
 
     if patients_df is None:
-        st.info("⚠ Ainda não há participantes cadastrados. "
-                "Carregue o formulário na Aba 1 para associar labels clínicos.")
+        st.info(
+            "⚠ Ainda não há participantes cadastrados. "
+            "Carregue o formulário na Aba 1 para associar labels clínicos."
+        )
         return
 
     st.subheader("Dataset atual de picos (para ML)")
@@ -341,16 +358,20 @@ def aba_otimizacao():
 
     # Junta picos + label vindo do formulário (via patient_id)
     if "patient_id" not in peaks_df.columns:
-        st.error("A tabela de picos não possui a coluna 'patient_id'. "
-                 "Verifique a Aba 2.")
+        st.error(
+            "A tabela de picos não possui a coluna 'patient_id'. "
+            "Verifique a Aba 2."
+        )
         return
 
     labels_slice = patients_df[["patient_id", label_col]].drop_duplicates(subset=["patient_id"])
     merged = peaks_df.merge(labels_slice, on="patient_id", how="inner")
 
     if merged.empty:
-        st.error("Não foi possível associar picos a labels. "
-                 "Verifique se os patient_id da Aba 2 correspondem aos da Aba 1.")
+        st.error(
+            "Não foi possível associar picos a labels. "
+            "Verifique se os patient_id da Aba 2 correspondem aos da Aba 1."
+        )
         return
 
     st.subheader("Tabela de picos com rótulos associados")
