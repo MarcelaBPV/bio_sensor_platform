@@ -6,14 +6,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from raman_core import (
+from raman_processing import (
     load_spectrum,
     preprocess_spectrum,
     detect_peaks,
     map_peaks_to_molecular_groups,
     infer_diseases,
 )
-
 
 st.set_page_config(
     page_title="BioRaman - Mapeamento Molecular e Doenças",
