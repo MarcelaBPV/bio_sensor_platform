@@ -8,6 +8,7 @@ Aba 2: Raman & Correlação (pipeline tipo Figura 1: despike, baseline,
 """
 
 from typing import List, Tuple, Dict, Optional, Any
+import json
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,7 @@ import raman_processing as rp
 st.set_page_config(page_title="Plataforma Bio-Raman", layout="wide")
 
 # ---------------------------------------------------------------------
-# FUNÇÕES ABA 1 (PACIENTES) – mesmas que você já tinha
+# FUNÇÕES ABA 1 (PACIENTES)
 # ---------------------------------------------------------------------
 def load_patient_table(file) -> pd.DataFrame:
     name = file.name.lower()
@@ -37,13 +38,17 @@ def load_patient_table(file) -> pd.DataFrame:
     return df
 
 def guess_gender_column(df: pd.DataFrame) -> Optional[str]:
-    candidates = [c for c in df.columns
-                  if any(k in c.lower() for k in ["sexo", "gênero", "genero", "sex", "gender"])]
+    candidates = [
+        c for c in df.columns
+        if any(k in c.lower() for k in ["sexo", "gênero", "genero", "sex", "gender"])
+    ]
     return candidates[0] if candidates else None
 
 def guess_smoker_column(df: pd.DataFrame) -> Optional[str]:
-    candidates = [c for c in df.columns
-                  if any(k in c.lower() for k in ["fuma", "fumante", "smoker"])]
+    candidates = [
+        c for c in df.columns
+        if any(k in c.lower() for k in ["fuma", "fumante", "smoker"])
+    ]
     return candidates[0] if candidates else None
 
 def guess_disease_column(df: pd.DataFrame) -> Optional[str]:
@@ -184,7 +189,6 @@ def plot_pipeline_panels(
 
     # b) Spike removal + métricas
     ax_b = fig.add_subplot(gs[0, 1])
-    # comparação simples: raw x despiked auto
     y_med, _, _ = rp.compare_despike_algorithms(y_raw)
     ax_b.plot(x_raw, y_raw, lw=0.5, label="raw")
     ax_b.plot(x_raw, y_med, lw=0.9, label="despiked")
@@ -308,7 +312,9 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["sexo"])
                 with c2:
-                    fig_sexo_bar = plot_percentage_bar(stats["sexo"]["percentual"], "Sexo/gênero – barras")
+                    fig_sexo_bar = plot_percentage_bar(
+                        stats["sexo"]["percentual"], "Sexo/gênero – barras"
+                    )
                     st.pyplot(fig_sexo_bar)
 
             if "fumante" in stats:
@@ -317,7 +323,9 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["fumante"])
                 with c2:
-                    fig_fum_bar = plot_percentage_bar(stats["fumante"]["percentual"], "Fumante – barras")
+                    fig_fum_bar = plot_percentage_bar(
+                        stats["fumante"]["percentual"], "Fumante – barras"
+                    )
                     st.pyplot(fig_fum_bar)
 
             if "doenca" in stats:
@@ -326,7 +334,9 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["doenca"])
                 with c2:
-                    fig_doenc_bar = plot_percentage_bar(stats["doenca"]["percentual"], "Doença declarada – barras")
+                    fig_doenc_bar = plot_percentage_bar(
+                        stats["doenca"]["percentual"], "Doença declarada – barras"
+                    )
                     st.pyplot(fig_doenc_bar)
 
             assoc_tab = compute_association_gender_smoker_disease(
@@ -364,10 +374,13 @@ with tab_raman:
     with col1:
         st.subheader("Arquivos de espectros")
         sample_file = st.file_uploader(
-            "Amostra (sangue em papel, etc.)", type=["txt", "csv", "xlsx"], key="sample"
+            "Amostra (sangue em papel, etc.)", type=["txt", "csv", "xlsx"]
+        )
+        paper_file = st.file_uploader(
+            "Papel / substrato (background)", type=["txt", "csv", "xlsx"]
         )
         si_file = st.file_uploader(
-            "Silício (padrão para ajuste fino)", type=["txt", "csv", "xlsx"], key="silicon"
+            "Silício (padrão para ajuste fino)", type=["txt", "csv", "xlsx"]
         )
 
     with col2:
@@ -392,7 +405,7 @@ with tab_raman:
     with col_btn2:
         run_fig = st.button("Mostrar figura tipo (a–g)")
 
-    # -------- Pipeline principal como antes ----------
+    # -------- Pipeline principal ----------
     if run_raman:
         if not sample_file:
             st.error("Carregue o espectro da amostra.")
@@ -421,6 +434,7 @@ with tab_raman:
                         sample_file=sample_file,
                         base_poly_coeffs=base_poly_coeffs,
                         silicon_ref_position=float(silicon_ref_value),
+                        paper_file=paper_file,
                         progress_cb=set_progress,
                     )
                 except Exception as e:
@@ -465,7 +479,7 @@ with tab_raman:
                             "intensity": p.intensity,
                             "width": p.width or "",
                             "group": p.group,
-                            "fit_params": rp.json.dumps(p.fit_params)
+                            "fit_params": json.dumps(p.fit_params)
                             if p.fit_params
                             else "",
                         }
@@ -502,15 +516,11 @@ with tab_raman:
             st.error("Carregue pelo menos o espectro da amostra.")
         else:
             x_raw, y_raw = rp.load_spectrum(sample_file)
-            # usa o mesmo preprocess que você já tem
             x_proc, y_proc, meta = rp.preprocess_spectrum(x_raw, y_raw)
-            # despike_metrics para gráfico b)
             despike_metrics = meta.get("despike_metrics", {})
             if not despike_metrics:
-                # roda comparação explícita se meta vazio
                 _, _, despike_metrics = rp.compare_despike_algorithms(y_raw)
 
-            # se tiver calibração, usa; senão só copia eixo
             if coeffs_str.strip() and si_file is not None:
                 base_poly_coeffs = np.fromstring(coeffs_str, sep=",")
                 res_tmp = rp.calibrate_with_fixed_pattern_and_silicon(
@@ -518,6 +528,7 @@ with tab_raman:
                     sample_file=sample_file,
                     base_poly_coeffs=base_poly_coeffs,
                     silicon_ref_position=float(silicon_ref_value),
+                    paper_file=paper_file,
                 )
                 x_cal = res_tmp["x_sample_calibrated"]
                 y_cal = res_tmp["y_sample_proc"]
