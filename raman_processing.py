@@ -7,7 +7,7 @@ Pipeline Raman harmonizado inspirado no ramanchada2:
 - Suavização + baseline + normalização
 - Detecção e ajuste multi-peak (lmfit Voigt/Gauss)
 - Mapeamento de grupos moleculares e regras de "doenças"
-- Calibração completa do eixo Raman (Neon/Poliestireno + Si)
+- Calibração do eixo Raman via padrão fixo + ajuste com Si
 - Geração de espectros sintéticos
 - Cache simples em HDF5 e export minimal NeXus-like
 """
@@ -528,7 +528,7 @@ def infer_diseases(peaks: List[Peak]) -> List[DiseaseMatch]:
 
 
 # ======================================================================
-# 10) CALIBRAÇÃO DE EIXO WAVENUMBER (FUNÇÃO BASE)
+# 10) CALIBRAÇÃO DE EIXO WAVENUMBER (FUNÇÕES BASE)
 # ======================================================================
 
 def calibrate_wavenumber(
@@ -563,52 +563,55 @@ def calibrate_intensity(y_meas: np.ndarray, y_ref: np.ndarray, y_std: np.ndarray
 
 
 # ======================================================================
-# 11) WORKFLOW COMPLETO DE CALIBRAÇÃO (CWA-STYLE) (C)
+# 11) WORKFLOW DE CALIBRAÇÃO COM PADRÃO FIXO + SILÍCIO
 # ======================================================================
 
-def _match_peaks_to_refs(
-    peak_positions: np.ndarray,
-    ref_positions: np.ndarray,
-    max_diff: float = 15.0,
-) -> Tuple[List[float], List[float]]:
+def apply_base_wavenumber_correction(
+    x_obs: np.ndarray,
+    base_poly_coeffs: np.ndarray,
+) -> np.ndarray:
     """
-    Casa cada ref_position com o pico mais próximo (se dentro de max_diff).
+    Aplica o polinômio de calibração global (padrão fixo) ao eixo observado.
+
+    base_poly_coeffs:
+        Coeficientes do polinômio (mesmo formato do np.polyfit),
+        que mapeia x_obs -> wavenumber_calibrado.
+        Ex.: obtidos previamente a partir de Neon/Poliestireno
+        em uma sessão de calibração única do equipamento.
     """
-    matched_obs = []
-    matched_ref = []
-    for ref in ref_positions:
-        idx = np.argmin(np.abs(peak_positions - ref))
-        obs = peak_positions[idx]
-        if abs(obs - ref) <= max_diff:
-            matched_obs.append(float(obs))
-            matched_ref.append(float(ref))
-    return matched_obs, matched_ref
+    base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
+    return np.polyval(base_poly_coeffs, x_obs)
 
 
-def calibrate_instrument_from_files(
-    neon_file,
-    polystyrene_file,
+def calibrate_with_fixed_pattern_and_silicon(
     silicon_file,
     sample_file,
-    neon_ref_positions: np.ndarray,
-    poly_ref_positions: np.ndarray,
+    base_poly_coeffs: np.ndarray,
     silicon_ref_position: float = 520.7,
-    poly_degree: int = 2,
     preprocess_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    C) Workflow de calibração:
-    1) Lê espectros de Neon, Poliestireno e Silício.
-    2) Pré-processa (despike/baseline/etc).
-    3) Detecta picos e associa com posições de referência.
-    4) Ajusta polinômio de calibração (Neon+Poli).
-    5) Ajusta zero do laser usando Silício.
-    6) Aplica correção ao espectro da amostra.
+    Workflow de calibração simplificado:
+
+    - Assume que já existe um polinômio global de calibração do eixo Raman
+      (base_poly_coeffs), obtido previamente com padrões como Neon/Poliestireno.
+      Esse polinômio é considerado fixo para o equipamento/campanha.
+
+    - Para cada sessão/medida:
+        1) Lê espectro de Silício.
+        2) Pré-processa (despike/baseline/etc).
+        3) Aplica o polinômio base (padrão fixo).
+        4) Localiza o pico de Si (~520.7 cm-1) e calcula o desvio residual.
+        5) Usa esse desvio para refinar o eixo (offset de laser).
+        6) Lê e pré-processa a amostra.
+        7) Aplica correção base + offset de Si ao eixo da amostra.
 
     Retorna dict com:
         - x_sample_raw, y_sample_raw
+        - x_sample_proc, y_sample_proc
         - x_sample_calibrated
-        - detalhes dos padrões, coeficientes e offset
+        - meta_sample
+        - informações da calibração (coeficientes base, posição do Si, offset)
     """
     if preprocess_kwargs is None:
         preprocess_kwargs = {
@@ -618,51 +621,38 @@ def calibrate_instrument_from_files(
             "normalize": False,
         }
 
-    # --- NEON ---
-    x_neon_raw, y_neon_raw = load_spectrum(neon_file)
-    x_neon, y_neon, _ = preprocess_spectrum(x_neon_raw, y_neon_raw, **preprocess_kwargs)
-    neon_peaks = detect_peaks(x_neon, y_neon, height=0.1, distance=3, prominence=0.05)
-    neon_positions = np.array([p.position_cm1 for p in neon_peaks], dtype=float)
-
-    obs_neon, ref_neon = _match_peaks_to_refs(neon_positions, neon_ref_positions)
-
-    # --- POLIESTIRENO ---
-    x_poly_raw, y_poly_raw = load_spectrum(polystyrene_file)
-    x_poly, y_poly, _ = preprocess_spectrum(x_poly_raw, y_poly_raw, **preprocess_kwargs)
-    poly_peaks = detect_peaks(x_poly, y_poly, height=0.1, distance=3, prominence=0.05)
-    poly_positions = np.array([p.position_cm1 for p in poly_peaks], dtype=float)
-
-    obs_poly, ref_poly = _match_peaks_to_refs(poly_positions, poly_ref_positions)
-
-    # Combina pontos de calibração (Neon + Poli)
-    obs_all = np.array(obs_neon + obs_poly, dtype=float)
-    ref_all = np.array(ref_neon + ref_poly, dtype=float)
-
-    if len(obs_all) < poly_degree + 1:
-        raise RuntimeError("Pontos de calibração insuficientes para o grau do polinômio.")
-
-    corrector_base, coeffs_base = calibrate_wavenumber(obs_all, ref_all, degree=poly_degree)
-
-    # --- SILÍCIO (zero do laser) ---
+    # -----------------------
+    # 1) SILÍCIO
+    # -----------------------
     x_si_raw, y_si_raw = load_spectrum(silicon_file)
     x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
 
-    # procura pico mais intenso na região típica do Si
-    mask_si = (x_si >= 480) & (x_si <= 560)
+    # Aplica polinômio base (padrão fixo)
+    x_si_base = apply_base_wavenumber_correction(x_si, base_poly_coeffs)
+
+    # Procura pico mais intenso na região típica do Si no eixo já corrigido
+    mask_si = (x_si_base >= 480) & (x_si_base <= 560)
     if not np.any(mask_si):
         raise RuntimeError("Não há pontos suficientes na janela de Si (480–560 cm-1).")
-    idx_max = np.argmax(y_si[mask_si])
-    x_si_region = x_si[mask_si]
-    si_obs_position = float(x_si_region[idx_max])
 
-    # valor calibrado pelo polinômio base
-    si_cal_base = float(corrector_base(np.array([si_obs_position]))[0])
+    idx_max = np.argmax(y_si[mask_si])
+    x_si_region = x_si_base[mask_si]
+    si_cal_base = float(x_si_region[idx_max])  # posição do pico de Si após correção base
+
+    # Offset residual entre o padrão fixo e o valor de referência do Si
     delta = silicon_ref_position - si_cal_base
 
     def corrector_final(x_arr: np.ndarray) -> np.ndarray:
-        return corrector_base(x_arr) + delta
+        """
+        Correção final aplicada à amostra:
+            x_corr = poly_base(x_obs) + delta_Si
+        """
+        x_base = apply_base_wavenumber_correction(x_arr, base_poly_coeffs)
+        return x_base + delta
 
-    # --- AMOSTRA ---
+    # -----------------------
+    # 2) AMOSTRA
+    # -----------------------
     x_s_raw, y_s_raw = load_spectrum(sample_file)
     x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
     x_s_cal = corrector_final(x_s)
@@ -675,19 +665,10 @@ def calibrate_instrument_from_files(
         "x_sample_calibrated": x_s_cal,
         "meta_sample": meta_s,
         "calibration": {
-            "obs_neon": obs_neon,
-            "ref_neon": ref_neon,
-            "obs_poly": obs_poly,
-            "ref_poly": ref_poly,
-            "coeffs_base": coeffs_base.tolist(),
-            "si_obs_position": si_obs_position,
+            "base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(),
             "si_cal_base": si_cal_base,
             "silicon_ref_position": silicon_ref_position,
             "laser_zero_delta": delta,
-        },
-        "standards": {
-            "neon_peaks": neon_positions.tolist(),
-            "poly_peaks": poly_positions.tolist(),
         },
     }
 
