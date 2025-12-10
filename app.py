@@ -1,11 +1,11 @@
 # appy.py
 # -*- coding: utf-8 -*-
 """
-Streamlit app integrado com pipeline Raman harmonizado:
-- comparador de despike (auto_compare)
-- ajuste multi-peak com lmfit (se disponível)
-- calibração CWA-style (Neon / Poliestireno / Silício)
-- export NeXus-like HDF5
+Streamlit app para harmonização de espectros Raman:
+- Comparador de despike (A)
+- Ajuste multi-peak com lmfit (B) quando disponível
+- Workflow de calibração CWA-like com Neon / Poliestireno / Silício (C)
+- Export HDF5 (NeXus-like)
 """
 
 import io
@@ -22,7 +22,7 @@ from scipy.signal import find_peaks, savgol_filter, medfilt
 from scipy.ndimage import median_filter
 from scipy.optimize import curve_fit
 
-# Optional libs
+# Dependências opcionais
 try:
     from lmfit.models import VoigtModel, GaussianModel, LorentzianModel
     LMFIT_AVAILABLE = True
@@ -35,11 +35,40 @@ try:
 except Exception:
     H5PY_AVAILABLE = False
 
+# =====================================================================
+# CONFIG STREAMLIT
+# =====================================================================
 st.set_page_config(page_title="Raman Harmonization", layout="wide")
 
-# ----------------------------
-# Minimal MOLECULAR_MAP / RULES
-# ----------------------------
+# =====================================================================
+# TABELAS PADRÃO DE REFERÊNCIA (ajuste conforme seu setup!)
+# =====================================================================
+
+# ⚠️ Estes valores são EXEMPLOS típicos. Ajuste para o seu laser/padrão.
+# Poliestireno – picos Raman mais usados para calibração (cm-1)
+POLYSTYRENE_REF_CM1 = np.array([
+    620.0,
+    1001.4,
+    1031.0,
+    1157.0,
+    1584.0,
+    1602.0,
+])
+
+# Neon – posições de “picos” em cm-1 (Raman shift) aqui são genéricas
+# e precisam ser ajustadas à sua configuração experimental. Em muitos
+# trabalhos usam o espectro de emissão e convertem para shift.
+NEON_REF_CM1 = np.array([
+    540.0,
+    585.2,
+    703.2,
+    743.9,
+    810.0,
+])
+
+# =====================================================================
+# MAPA MOLECULAR E REGRAS
+# =====================================================================
 MOLECULAR_MAP = [
     {"range": (700, 740), "group": "Hemoglobina / porfirinas"},
     {"range": (995, 1005), "group": "Fenilalanina (anéis aromáticos)"},
@@ -48,15 +77,27 @@ MOLECULAR_MAP = [
 ]
 
 DISEASE_RULES = [
-    {"name": "Alteração hemoglobina", "description": "Heme/porfirinas", "groups_required": ["Hemoglobina / porfirinas"]},
-    {"name": "Alteração proteica", "description": "Amida I", "groups_required": ["Amidas / proteínas (C=O)"]},
-    {"name": "Alteração lipídica", "description": "Lipídios", "groups_required": ["Lipídios / CH2 deformação"]},
+    {
+        "name": "Alteração hemoglobina",
+        "description": "Padrão compatível com alterações em heme / porfirinas.",
+        "groups_required": ["Hemoglobina / porfirinas"],
+    },
+    {
+        "name": "Alteração proteica",
+        "description": "Padrão compatível com alterações em proteínas (amida I).",
+        "groups_required": ["Amidas / proteínas (C=O)"],
+    },
+    {
+        "name": "Alteração lipídica",
+        "description": "Padrão compatível com alterações em lipídios de membrana.",
+        "groups_required": ["Lipídios / CH2 deformação"],
+    },
 ]
 
 
-# ----------------------------
-# Data classes
-# ----------------------------
+# =====================================================================
+# DATA CLASS
+# =====================================================================
 @dataclass
 class Peak:
     position_cm1: float
@@ -66,13 +107,12 @@ class Peak:
     fit_params: Optional[Dict[str, Any]] = None
 
 
-# ----------------------------
-# Utility: load spectrum robust
-# ----------------------------
+# =====================================================================
+# FUNÇÕES AUXILIARES – CARREGAMENTO
+# =====================================================================
 def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
     """
-    file_like: objeto similar a arquivo (BytesIO) com attribute .name recomendado.
-    Retorna (x, y) numpy arrays.
+    Lê arquivo de espectro e retorna (x, y).
     """
     filename = getattr(file_like, "name", "").lower()
     try:
@@ -87,7 +127,6 @@ def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
         elif filename.endswith((".xls", ".xlsx")):
             df = pd.read_excel(file_like)
         else:
-            # fallback
             file_like.seek(0)
             df = pd.read_csv(file_like, sep=r"\s+", comment="#", engine="python", header=None)
     except Exception as e:
@@ -104,9 +143,9 @@ def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
     return x, y
 
 
-# ----------------------------
-# Despike methods + comparator
-# ----------------------------
+# =====================================================================
+# DESPIKE + COMPARADOR
+# =====================================================================
 def despike(y: np.ndarray, method: str = "median", kernel_size: int = 5, z_thresh: float = 6.0) -> np.ndarray:
     y = y.copy()
     if method == "median":
@@ -134,10 +173,10 @@ def _despike_metric(y_original: np.ndarray, y_despiked: np.ndarray) -> float:
     return float(smooth_term + alpha * mse)
 
 
-def compare_despike_algorithms(y: np.ndarray, methods: Optional[List[str]] = None, kernel_size: int = 5) -> Tuple[np.ndarray, str, Dict[str, float]]:
+def compare_despike_algorithms(y: np.ndarray, methods: Optional[List[str]] = None, kernel_size: int = 5):
     if methods is None:
         methods = ["median", "zscore", "median_filter_nd"]
-    metrics = {}
+    metrics: Dict[str, float] = {}
     best_metric = np.inf
     best_y = y.copy()
     best_method = None
@@ -152,9 +191,9 @@ def compare_despike_algorithms(y: np.ndarray, methods: Optional[List[str]] = Non
     return best_y, best_method, metrics
 
 
-# ----------------------------
-# Baseline (ALS + FFT)
-# ----------------------------
+# =====================================================================
+# BASELINE
+# =====================================================================
 def baseline_als(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
     L = len(y)
     D = np.diff(np.eye(L), 2)
@@ -177,18 +216,22 @@ def baseline_fft_smooth(y: np.ndarray, cutoff_fraction: float = 0.02) -> np.ndar
     return baseline
 
 
-# ----------------------------
-# Preprocess pipeline (uses auto_compare by default)
-# ----------------------------
-def preprocess_spectrum(x: np.ndarray, y: np.ndarray,
-                        despike_method: Optional[str] = "auto_compare",
-                        smooth: bool = True,
-                        window_length: int = 9,
-                        polyorder: int = 3,
-                        baseline_method: str = "als",
-                        normalize: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+# =====================================================================
+# PRÉ-PROCESSAMENTO
+# =====================================================================
+def preprocess_spectrum(
+    x: np.ndarray,
+    y: np.ndarray,
+    despike_method: Optional[str] = "auto_compare",
+    smooth: bool = True,
+    window_length: int = 9,
+    polyorder: int = 3,
+    baseline_method: str = "als",
+    normalize: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     y_proc = y.astype(float).copy()
-    meta = {}
+    meta: Dict[str, Any] = {}
+
     # despike
     if despike_method == "auto_compare":
         y_proc, best, metrics = compare_despike_algorithms(y_proc)
@@ -229,33 +272,30 @@ def preprocess_spectrum(x: np.ndarray, y: np.ndarray,
     return x, y_proc, meta
 
 
-# ----------------------------
-# Detect peaks
-# ----------------------------
-def detect_peaks(x: np.ndarray, y: np.ndarray, height: float = 0.05, distance: int = 5, prominence: float = 0.02) -> List[Peak]:
-    indices, properties = find_peaks(y, height=height, distance=distance, prominence=prominence)
-    peaks = [Peak(position_cm1=float(x[idx]), intensity=float(y[idx])) for idx in indices]
-    return peaks
+# =====================================================================
+# DETECÇÃO + FIT DE PICOS (lmfit se disponível)
+# =====================================================================
+def detect_peaks(
+    x: np.ndarray,
+    y: np.ndarray,
+    height: float = 0.05,
+    distance: int = 5,
+    prominence: float = 0.02,
+) -> List[Peak]:
+    indices, _ = find_peaks(y, height=height, distance=distance, prominence=prominence)
+    return [Peak(position_cm1=float(x[i]), intensity=float(y[i])) for i in indices]
 
 
-# ----------------------------
-# Map peaks to molecular groups
-# ----------------------------
 def map_peaks_to_molecular_groups(peaks: List[Peak]) -> List[Peak]:
     for peak in peaks:
-        group_found = None
         for item in MOLECULAR_MAP:
             x_min, x_max = item["range"]
             if x_min <= peak.position_cm1 <= x_max:
-                group_found = item["group"]
+                peak.group = item["group"]
                 break
-        peak.group = group_found
     return peaks
 
 
-# ----------------------------
-# Simple gaussian fit fallback
-# ----------------------------
 def gaussian(x, amp, cen, wid):
     return amp * np.exp(-(x - cen) ** 2 / (2 * wid ** 2))
 
@@ -275,13 +315,15 @@ def fit_peak_simple(x, y, center, window=10.0):
         return {}
 
 
-# ----------------------------
-# lmfit multi-peak (if available)
-# ----------------------------
-def fit_peaks_lmfit_global(x: np.ndarray, y: np.ndarray, peaks: List[Peak], model_type: str = "Voigt") -> List[Peak]:
+def fit_peaks_lmfit_global(
+    x: np.ndarray,
+    y: np.ndarray,
+    peaks: List[Peak],
+    model_type: str = "Voigt",
+) -> List[Peak]:
     if not LMFIT_AVAILABLE:
         raise RuntimeError("lmfit não está disponível.")
-    # choose subwindow
+
     xmin = min(p.position_cm1 for p in peaks) - 20
     xmax = max(p.position_cm1 for p in peaks) + 20
     mask = (x >= xmin) & (x <= xmax)
@@ -351,9 +393,9 @@ def fit_peaks(x, y, peaks: List[Peak], use_lmfit: bool = True) -> List[Peak]:
     return peaks
 
 
-# ----------------------------
-# infer diseases (simple rules)
-# ----------------------------
+# =====================================================================
+# REGRAS DE PADRÕES
+# =====================================================================
 def infer_diseases(peaks: List[Peak]):
     groups_present = {p.group for p in peaks if p.group is not None}
     matches = []
@@ -362,13 +404,13 @@ def infer_diseases(peaks: List[Peak]):
         score = len(required.intersection(groups_present))
         if score > 0:
             matches.append({"name": rule["name"], "score": score, "description": rule["description"]})
-    matches = sorted(matches, key=lambda m: m["score"], reverse=True)
+    matches.sort(key=lambda m: m["score"], reverse=True)
     return matches
 
 
-# ----------------------------
-# calibration helpers
-# ----------------------------
+# =====================================================================
+# CALIBRAÇÃO
+# =====================================================================
 def calibrate_wavenumber(observed_positions: np.ndarray, reference_positions: np.ndarray, degree: int = 1):
     if len(observed_positions) < degree + 1:
         raise ValueError("Pontos insuficientes para calibrar com esse grau.")
@@ -390,20 +432,47 @@ def _match_peaks_to_refs(peak_positions: np.ndarray, ref_positions: np.ndarray, 
     return matched_obs, matched_ref
 
 
-def calibrate_instrument_from_files(neon_file, polystyrene_file, silicon_file, sample_file,
-                                    neon_ref_positions: np.ndarray, poly_ref_positions: np.ndarray,
-                                    silicon_ref_position: float = 520.7, poly_degree: int = 2) -> Dict[str, Any]:
-    preprocess_kwargs = {"despike_method": "auto_compare", "smooth": True, "baseline_method": "als", "normalize": False}
+def calibrate_instrument_from_files(
+    neon_file,
+    polystyrene_file,
+    silicon_file,
+    sample_file,
+    neon_ref_positions: np.ndarray,
+    poly_ref_positions: np.ndarray,
+    silicon_ref_position: float = 520.7,
+    poly_degree: int = 2,
+    progress_cb=None,
+) -> Dict[str, Any]:
+    """
+    Workflow completo de calibração CWA-like.
+    progress_cb: função opcional para atualizar barra de progresso (0–100).
+    """
+    preprocess_kwargs = {
+        "despike_method": "auto_compare",
+        "smooth": True,
+        "baseline_method": "als",
+        "normalize": False,
+    }
 
+    def _tick(pct, text=""):
+        if progress_cb is not None:
+            progress_cb(pct, text)
+
+    # 1) NEON
+    _tick(10, "Carregando Neon...")
     x_neon_raw, y_neon_raw = load_spectrum(neon_file)
     x_neon, y_neon, _ = preprocess_spectrum(x_neon_raw, y_neon_raw, **preprocess_kwargs)
+    _tick(20, "Detectando picos em Neon...")
     neon_peaks = detect_peaks(x_neon, y_neon, height=0.1, distance=3, prominence=0.05)
     neon_positions = np.array([p.position_cm1 for p in neon_peaks])
 
     obs_neon, ref_neon = _match_peaks_to_refs(neon_positions, neon_ref_positions)
 
+    # 2) POLIESTIRENO
+    _tick(35, "Carregando Poliestireno...")
     x_poly_raw, y_poly_raw = load_spectrum(polystyrene_file)
     x_poly, y_poly, _ = preprocess_spectrum(x_poly_raw, y_poly_raw, **preprocess_kwargs)
+    _tick(45, "Detectando picos em Poliestireno...")
     poly_peaks = detect_peaks(x_poly, y_poly, height=0.1, distance=3, prominence=0.05)
     poly_positions = np.array([p.position_cm1 for p in poly_peaks])
 
@@ -413,56 +482,74 @@ def calibrate_instrument_from_files(neon_file, polystyrene_file, silicon_file, s
     ref_all = np.array(ref_neon + ref_poly, dtype=float)
 
     if len(obs_all) < poly_degree + 1:
-        raise RuntimeError("Pontos de calibração insuficientes para o grau pedido.")
+        raise RuntimeError("Pontos de calibração insuficientes para o grau do polinômio.")
 
+    _tick(55, "Ajustando polinômio de calibração (Neon + Poli)...")
     corrector_base, coeffs_base = calibrate_wavenumber(obs_all, ref_all, degree=poly_degree)
 
-    # silicon zeroing
+    # 3) SILÍCIO
+    _tick(65, "Carregando Silício (zero do laser)...")
     x_si_raw, y_si_raw = load_spectrum(silicon_file)
     x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
     mask_si = (x_si >= 480) & (x_si <= 560)
     if not np.any(mask_si):
-        raise RuntimeError("Sem dados na janela de silício (480-560 cm-1).")
+        raise RuntimeError("Sem dados na janela de silício (480–560 cm-1).")
     idx_max = np.argmax(y_si[mask_si])
     x_si_region = x_si[mask_si]
     si_obs_position = float(x_si_region[idx_max])
+
     si_cal_base = float(corrector_base(np.array([si_obs_position]))[0])
     delta = silicon_ref_position - si_cal_base
 
     def corrector_final(x_arr):
         return corrector_base(x_arr) + delta
 
-    # apply to sample
+    # 4) AMOSTRA
+    _tick(75, "Carregando espectro da amostra...")
     x_s_raw, y_s_raw = load_spectrum(sample_file)
     x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
+
+    _tick(85, "Aplicando calibração à amostra...")
     x_s_cal = corrector_final(x_s)
 
+    _tick(100, "Calibração concluída.")
     return {
-        "x_sample_raw": x_s_raw, "y_sample_raw": y_s_raw,
-        "x_sample_proc": x_s, "y_sample_proc": y_s,
-        "x_sample_calibrated": x_s_cal, "meta_sample": meta_s,
+        "x_sample_raw": x_s_raw,
+        "y_sample_raw": y_s_raw,
+        "x_sample_proc": x_s,
+        "y_sample_proc": y_s,
+        "x_sample_calibrated": x_s_cal,
+        "meta_sample": meta_s,
         "calibration": {
-            "obs_neon": obs_neon, "ref_neon": ref_neon,
-            "obs_poly": obs_poly, "ref_poly": ref_poly,
+            "obs_neon": obs_neon,
+            "ref_neon": ref_neon,
+            "obs_poly": obs_poly,
+            "ref_poly": ref_poly,
             "coeffs_base": coeffs_base.tolist(),
-            "si_obs_position": si_obs_position, "si_cal_base": si_cal_base,
-            "silicon_ref_position": silicon_ref_position, "laser_zero_delta": delta
+            "si_obs_position": si_obs_position,
+            "si_cal_base": si_cal_base,
+            "silicon_ref_position": silicon_ref_position,
+            "laser_zero_delta": delta,
         },
-        "standards": {"neon_peaks": neon_positions.tolist(), "poly_peaks": poly_positions.tolist()}
+        "standards": {
+            "neon_peaks": neon_positions.tolist(),
+            "poly_peaks": poly_positions.tolist(),
+        },
     }
 
 
-# ----------------------------
-# save nexus-like (HDF5)
-# ----------------------------
+# =====================================================================
+# EXPORT HDF5 (NeXus-like)
+# =====================================================================
 def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) -> bytes:
     if not H5PY_AVAILABLE:
-        raise RuntimeError("h5py não instalado; instale com 'pip install h5py' para export HDF5.")
+        raise RuntimeError("h5py não instalado.")
     bio = io.BytesIO()
     with h5py.File(bio, "w") as f:
         nxentry = f.create_group("entry")
         nxentry.attrs["NX_class"] = "NXentry"
-        nxdata = nxentry.create_group("data"); nxdata.attrs["NX_class"] = "NXdata"
+        nxdata = nxentry.create_group("data")
+        nxdata.attrs["NX_class"] = "NXdata"
         nxdata.create_dataset("wavenumber", data=x)
         nxdata.create_dataset("intensity", data=y)
         meta_grp = nxentry.create_group("metadata")
@@ -472,34 +559,51 @@ def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) 
     return bio.read()
 
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
-st.title("Raman Harmonization — Streamlit")
-st.markdown("Upload dos arquivos (amostra + padrões) e execute calibração completa (CWA-style).")
+# =====================================================================
+# UI STREAMLIT
+# =====================================================================
+st.title("Raman Harmonization — Pipeline tipo ramanchada2")
+st.caption("Upload da amostra + padrões (Neon, Poliestireno, Silício) • Pré-processamento • Calibração • Detecção & Fit de picos")
 
-col1, col2 = st.columns(2)
+# Layout principal com colunas
+left_col, right_col = st.columns([1, 1])
 
-with col1:
-    st.header("Arquivos")
-    sample_file = st.file_uploader("Carregar espectro da amostra (sample)", type=["txt", "csv", "xlsx"])
-    neon_file = st.file_uploader("Carregar espectro Neon (padrão de emissão)", type=["txt", "csv", "xlsx"])
-    poly_file = st.file_uploader("Carregar espectro Poliestireno (padrão Raman)", type=["txt", "csv", "xlsx"])
-    si_file = st.file_uploader("Carregar espectro Silício (laser zero)", type=["txt", "csv", "xlsx"])
+with left_col:
+    st.subheader("Arquivos de entrada")
+    sample_file = st.file_uploader("Amostra (sample)", type=["txt", "csv", "xlsx"])
+    neon_file = st.file_uploader("Neon (padrão de emissão)", type=["txt", "csv", "xlsx"])
+    poly_file = st.file_uploader("Poliestireno (padrão Raman)", type=["txt", "csv", "xlsx"])
+    si_file = st.file_uploader("Silício (zero do laser)", type=["txt", "csv", "xlsx"])
 
-    st.divider()
-    st.header("Opções")
-    use_lmfit = st.checkbox("Usar lmfit para ajuste multi-peak (se disponível)", value=LMFIT_AVAILABLE)
-    calibrate_degree = st.selectbox("Grau do polinômio de calibração", options=[1, 2, 3], index=1)
-    st.markdown("Se não souber as posições de referência, posso fornecer uma lista padrão se pedir.")
+with right_col:
+    st.subheader("Configurações")
+    use_lmfit = st.checkbox("Usar lmfit (ajuste multi-peak Voigt)", value=LMFIT_AVAILABLE)
+    calibrate_degree = st.selectbox("Grau polinômio calibração (Neon+Poli)", options=[1, 2, 3], index=1)
+    silicon_ref_value = st.number_input("Posição de referência do pico do Silício (cm⁻¹)", value=520.7, format="%.2f")
 
-with col2:
-    st.header("Referências (informe arrays ou deixe em branco e eu uso ‘dummy’ para teste)")
-    neon_ref_text = st.text_area("Neon ref positions (cm-1), ex: 540.0,585.2, etc.", height=80)
-    poly_ref_text = st.text_area("Poliestireno ref positions (cm-1), ex: 1001.4,1601.0, etc.", height=80)
-    silicon_ref_value = st.number_input("Silicon reference (cm-1)", value=520.7, format="%.2f")
+    st.markdown("### Posições de referência")
+    ref_mode = st.radio(
+        "Modo de referência:",
+        ["Usar tabelas padrão (recomendado)", "Informar manualmente"],
+        index=0,
+    )
 
-# decode ref arrays
+    if ref_mode == "Informar manualmente":
+        neon_ref_text = st.text_area(
+            "Neon ref positions (cm⁻¹) – separado por vírgulas",
+            value="",
+            height=60,
+        )
+        poly_ref_text = st.text_area(
+            "Poliestireno ref positions (cm⁻¹) – separado por vírgulas",
+            value="",
+            height=60,
+        )
+    else:
+        st.write("**Neon (padrão)**:", ", ".join([f"{v:.1f}" for v in NEON_REF_CM1]))
+        st.write("**Poliestireno (padrão)**:", ", ".join([f"{v:.1f}" for v in POLYSTYRENE_REF_CM1]))
+        st.caption("⚠️ Ajuste esses valores no código conforme as linhas usadas no seu setup real.")
+
 def parse_positions(text: str) -> np.ndarray:
     try:
         if not text or text.strip() == "":
@@ -507,101 +611,133 @@ def parse_positions(text: str) -> np.ndarray:
         parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip() != ""]
         return np.array([float(p) for p in parts], dtype=float)
     except Exception:
-        st.error("Erro ao parsear posições de referência. Use vírgulas.")
+        st.error("Erro ao interpretar posições. Use números separados por vírgula.")
         return np.array([])
 
-neon_refs = parse_positions(neon_ref_text)
-poly_refs = parse_positions(poly_ref_text)
 
-# BUTTON: run calibration and processing
-if st.button("Executar calibração completa (A+B+C)"):
-    if not sample_file:
-        st.error("Carregue o espectro da amostra.")
-    elif not neon_file or not poly_file or not si_file:
-        st.error("Carregue os três padrões (Neon, Poliestireno, Silício) para calibração.")
-    else:
-        # Provide defaults if refs empty (for demo/testing)
-        if neon_refs.size == 0:
-            st.warning("Nenhuma referência Neon fornecida — usando posições exemplo (demo).")
-            neon_refs = np.array([540.0, 585.2, 703.2, 743.9])  # ex. (substituir por tabela real)
-        if poly_refs.size == 0:
-            st.warning("Nenhuma referência Poliestireno fornecida — usando posições exemplo (demo).")
-            poly_refs = np.array([620.0, 1001.4, 1601.0])  # ex. (substituir por tabela real)
+if ref_mode == "Informar manualmente":
+    neon_refs = parse_positions(st.session_state.get("neon_ref_text", "") if "neon_ref_text" in st.session_state else neon_ref_text)
+    poly_refs = parse_positions(st.session_state.get("poly_ref_text", "") if "poly_ref_text" in st.session_state else poly_ref_text)
+else:
+    neon_refs = NEON_REF_CM1.copy()
+    poly_refs = POLYSTYRENE_REF_CM1.copy()
 
-        with st.spinner("Processando e calibrando..."):
-            try:
-                res_calib = calibrate_instrument_from_files(
-                    neon_file=neon_file,
-                    polystyrene_file=poly_file,
-                    silicon_file=si_file,
-                    sample_file=sample_file,
-                    neon_ref_positions=neon_refs,
-                    poly_ref_positions=poly_refs,
-                    silicon_ref_position=float(silicon_ref_value),
-                    poly_degree=int(calibrate_degree),
-                )
-            except Exception as e:
-                st.error(f"Erro na calibração: {e}")
-                st.exception(e)
-                st.stop()
-
-        st.success("Calibração aplicada com sucesso.")
-
-        # plots: raw vs proc vs calibrated
-        fig, axs = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
-        axs[0].plot(res_calib["x_sample_raw"], res_calib["y_sample_raw"], lw=0.6, label="raw")
-        axs[0].plot(res_calib["x_sample_proc"], res_calib["y_sample_proc"], lw=0.9, label="processado")
-        axs[0].set_xlabel("cm⁻¹ (raw)")
-        axs[0].set_title("Raw vs Processado (no eixo original)")
-        axs[0].legend()
-
-        axs[1].plot(res_calib["x_sample_calibrated"], res_calib["y_sample_proc"], lw=0.9)
-        axs[1].set_xlabel("cm⁻¹ (calibrado)")
-        axs[1].set_title("Processado (aplicado calibração)")
-        st.pyplot(fig)
-
-        # detect peaks on calibrated x
-        x_cal = res_calib["x_sample_calibrated"]
-        y_proc = res_calib["y_sample_proc"]
-        # detect on calibrated axis - but our detect_peaks uses array index mapping; we pass original x and y
-        peaks = detect_peaks(x_cal, y_proc, height=0.05, distance=5, prominence=0.02)
-        peaks = fit_peaks(x_cal, y_proc, peaks, use_lmfit=use_lmfit)
-        peaks = map_peaks_to_molecular_groups(peaks)
-        diseases = infer_diseases(peaks)
-
-        # show peaks table
-        if len(peaks) > 0:
-            df_peaks = pd.DataFrame([{
-                "position_cm-1": p.position_cm1,
-                "intensity": p.intensity,
-                "width": p.width or "",
-                "group": p.group,
-                "fit_params": json.dumps(p.fit_params) if p.fit_params else ""
-            } for p in peaks])
-            st.subheader("Picos detectados (após calibração)")
-            st.dataframe(df_peaks)
-        else:
-            st.info("Nenhum pico detectado com os parâmetros atuais.")
-
-        # show disease matches
-        st.subheader("Padrões sugeridos (pesquisa)")
-        if diseases:
-            st.table(pd.DataFrame(diseases))
-        else:
-            st.write("Nenhum padrão identificado com as regras atuais.")
-
-        # show calibration metadata
-        st.subheader("Detalhes de calibração")
-        st.json(res_calib["calibration"])
-
-        # Export HDF5 (NeXus-like)
-        if H5PY_AVAILABLE:
-            bytes_h5 = save_to_nexus_bytes(res_calib["x_sample_calibrated"], res_calib["y_sample_proc"],
-                                           {"calibration": json.dumps(res_calib["calibration"])})
-            st.download_button("Baixar (NeXus-like .h5)", data=bytes_h5, file_name="sample_calibrated.h5", mime="application/octet-stream")
-        else:
-            st.info("h5py não instalado; instale com 'pip install h5py' para habilitar export HDF5.")
-
-# Footer
 st.markdown("---")
-st.markdown("Made for your Raman harmonization pipeline — quer que eu adapte o layout ou adicione uma tela para salvar histórico `.cha` (cache HDF5)?")
+
+tab_main, tab_debug = st.tabs(["🔬 Calibração & Picos", "🛠 Detalhes técnicos"])
+
+with tab_main:
+    run_btn = st.button("Executar pipeline completo (A+B+C)")
+
+    if run_btn:
+        if not sample_file:
+            st.error("Carregue o espectro da amostra.")
+        elif not neon_file or not poly_file or not si_file:
+            st.error("Carregue também os espectros de Neon, Poliestireno e Silício.")
+        elif neon_refs.size == 0 or poly_refs.size == 0:
+            st.error("Posições de referência de Neon ou Poliestireno vazias.")
+        else:
+            progress = st.progress(0, text="Iniciando pipeline...")
+
+            def set_progress(p, text=""):
+                progress.progress(int(p), text=text)
+
+            with st.spinner("Processando..."):
+                try:
+                    res_calib = calibrate_instrument_from_files(
+                        neon_file=neon_file,
+                        polystyrene_file=poly_file,
+                        silicon_file=si_file,
+                        sample_file=sample_file,
+                        neon_ref_positions=neon_refs,
+                        poly_ref_positions=poly_refs,
+                        silicon_ref_position=float(silicon_ref_value),
+                        poly_degree=int(calibrate_degree),
+                        progress_cb=set_progress,
+                    )
+                except Exception as e:
+                    progress.empty()
+                    st.error(f"Erro na calibração: {e}")
+                    st.exception(e)
+                    st.stop()
+
+            progress.empty()
+            st.success("Pipeline concluído com sucesso.")
+
+            x_raw = res_calib["x_sample_raw"]
+            y_raw = res_calib["y_sample_raw"]
+            x_proc = res_calib["x_sample_proc"]
+            y_proc = res_calib["y_sample_proc"]
+            x_cal = res_calib["x_sample_calibrated"]
+
+            # PLots
+            fig, axs = plt.subplots(1, 2, figsize=(13, 4), constrained_layout=True)
+            axs[0].plot(x_raw, y_raw, lw=0.6, label="Raw")
+            axs[0].plot(x_proc, y_proc, lw=0.9, label="Processado")
+            axs[0].set_xlabel("Deslocamento Raman (cm⁻¹, eixo original)")
+            axs[0].set_title("Raw vs Processado")
+            axs[0].legend()
+
+            axs[1].plot(x_cal, y_proc, lw=0.9)
+            axs[1].set_xlabel("Deslocamento Raman (cm⁻¹, calibrado)")
+            axs[1].set_title("Processado no eixo calibrado")
+            st.pyplot(fig)
+
+            # Picos e fit no eixo calibrado
+            peaks = detect_peaks(x_cal, y_proc, height=0.05, distance=5, prominence=0.02)
+            peaks = fit_peaks(x_cal, y_proc, peaks, use_lmfit=use_lmfit)
+            peaks = map_peaks_to_molecular_groups(peaks)
+            diseases = infer_diseases(peaks)
+
+            if peaks:
+                df_peaks = pd.DataFrame([
+                    {
+                        "position_cm-1": p.position_cm1,
+                        "intensity": p.intensity,
+                        "width": p.width or "",
+                        "group": p.group,
+                        "fit_params": json.dumps(p.fit_params) if p.fit_params else "",
+                    }
+                    for p in peaks
+                ])
+                st.subheader("Picos detectados (eixo calibrado)")
+                st.dataframe(df_peaks)
+            else:
+                st.info("Nenhum pico detectado com os parâmetros atuais.")
+
+            st.subheader("Padrões sugeridos (pesquisa, NÃO diagnóstico)")
+            if diseases:
+                st.table(pd.DataFrame(diseases))
+            else:
+                st.write("Nenhum padrão encontrado com as regras atuais.")
+
+            # Export HDF5
+            if H5PY_AVAILABLE:
+                bytes_h5 = save_to_nexus_bytes(
+                    x_cal,
+                    y_proc,
+                    {"calibration": json.dumps(res_calib["calibration"])},
+                )
+                st.download_button(
+                    "Baixar espectro calibrado (NeXus-like .h5)",
+                    data=bytes_h5,
+                    file_name="sample_calibrated.h5",
+                    mime="application/octet-stream",
+                )
+            else:
+                st.info("Instale 'h5py' para habilitar export HDF5 (pip install h5py).")
+
+with tab_debug:
+    st.markdown("### Tabelas padrão usadas")
+    st.write("**Neon (cm⁻¹, exemplo):**", NEON_REF_CM1)
+    st.write("**Poliestireno (cm⁻¹, exemplo):**", POLYSTYRENE_REF_CM1)
+
+    st.markdown("### Observação importante")
+    st.info(
+        "As posições de referência acima são exemplos típicos da literatura. "
+        "Ajuste-as no código para refletir exatamente o seu padrão (laser, geometria, "
+        "arquivo de referência NIST, etc.)."
+    )
+
+st.markdown("---")
+st.caption("Se quiser, posso separar esse código em módulo backend + app Streamlit, ou integrar com seu banco de dados / Supabase.")
