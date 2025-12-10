@@ -70,6 +70,10 @@ class Peak:
 # LEITURA DE ESPECTROS
 # ---------------------------------------------------------------------
 def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Lê arquivo de espectro (txt, csv, xls/xlsx) e retorna (x, y) como numpy arrays.
+    Tenta detectar automaticamente separador e ignora colunas não numéricas.
+    """
     filename = getattr(file_like, "name", "").lower()
     try:
         if filename.endswith(".txt"):
@@ -119,6 +123,9 @@ def despike(
     kernel_size: int = 5,
     z_thresh: float = 6.0,
 ) -> np.ndarray:
+    """
+    Remove spikes do espectro por diferentes métodos.
+    """
     y = y.copy()
     if method == "median":
         y_filtered = medfilt(y, kernel_size=kernel_size)
@@ -150,6 +157,10 @@ def compare_despike_algorithms(
     methods: Optional[List[str]] = None,
     kernel_size: int = 5,
 ):
+    """
+    Compara algoritmos de despike e retorna:
+    (melhor_espectro, melhor_método, dicionário_métricas)
+    """
     if methods is None:
         methods = ["median", "zscore", "median_filter_nd"]
     metrics: Dict[str, float] = {}
@@ -177,8 +188,7 @@ def baseline_als(
 ) -> np.ndarray:
     """
     Baseline ALS estável (versão esparsa).
-
-    Evita erros de broadcast do tipo (L,L) vs (L-2,L-2) na soma W + H.
+    Evita erros de broadcast (L,L) vs (L-2,L-2).
     """
     y = np.asarray(y, dtype=float)
     L = y.size
@@ -213,9 +223,18 @@ def preprocess_spectrum(
     baseline_method: str = "als",
     normalize: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Pipeline de pré-processamento:
+      - despike
+      - suavização Savitzky-Golay
+      - correção de baseline (ALS ou FFT)
+      - normalização (0–1)
+    Retorna (x, y_processado, metadados)
+    """
     y_proc = y.astype(float).copy()
     meta: Dict[str, Any] = {}
 
+    # despike
     if despike_method == "auto_compare":
         y_proc, best, metrics = compare_despike_algorithms(y_proc)
         meta["despike_method"] = best
@@ -224,6 +243,7 @@ def preprocess_spectrum(
         y_proc = despike(y_proc, method=despike_method)
         meta["despike_method"] = despike_method
 
+    # smoothing
     if smooth:
         if window_length >= len(y_proc):
             window_length = len(y_proc) - 1
@@ -238,6 +258,7 @@ def preprocess_spectrum(
             "polyorder": polyorder,
         }
 
+    # baseline
     if baseline_method == "als":
         base = baseline_als(y_proc)
     elif baseline_method == "fft":
@@ -247,6 +268,7 @@ def preprocess_spectrum(
     y_proc = y_proc - base
     meta["baseline"] = {"method": baseline_method}
 
+    # normalização
     if normalize:
         ymin = float(np.min(y_proc))
         ymax = float(np.max(y_proc))
@@ -266,12 +288,18 @@ def detect_peaks(
     distance: int = 5,
     prominence: float = 0.02,
 ) -> List[Peak]:
+    """
+    Detecta picos no espectro processado.
+    """
     indices, _ = find_peaks(
         y, height=height, distance=distance, prominence=prominence
     )
     return [Peak(position_cm1=float(x[i]), intensity=float(y[i])) for i in indices]
 
 def map_peaks_to_molecular_groups(peaks: List[Peak]) -> List[Peak]:
+    """
+    Atribui grupos moleculares aos picos com base em MOLECULAR_MAP.
+    """
     for p in peaks:
         p.group = None
         for item in MOLECULAR_MAP:
@@ -285,6 +313,9 @@ def gaussian(x, amp, cen, wid):
     return amp * np.exp(-(x - cen) ** 2 / (2 * wid ** 2))
 
 def fit_peak_simple(x, y, center, window=10.0):
+    """
+    Ajuste Gaussiano simples ao redor de um pico (sem lmfit).
+    """
     mask = (x >= center - window) & (x <= center + window)
     xi, yi = x[mask], y[mask]
     if len(xi) < 5:
@@ -313,6 +344,9 @@ def fit_peaks_lmfit_global(
     peaks: List[Peak],
     model_type: str = "Voigt",
 ) -> List[Peak]:
+    """
+    Ajuste global multi-pico usando lmfit (Voigt/Gauss/Lorentz).
+    """
     if not LMFIT_AVAILABLE:
         raise RuntimeError("lmfit não está disponível.")
     xmin = min(p.position_cm1 for p in peaks) - 20
@@ -331,7 +365,7 @@ def fit_peaks_lmfit_global(
         else:
             return VoigtModel(prefix=prefix)
 
-    model = None
+    model = None    # type: ignore
     for i, p in enumerate(peaks):
         m = make_model(f"p{i}_")
         model = m if model is None else (model + m)
@@ -367,6 +401,9 @@ def fit_peaks_lmfit_global(
     return peaks
 
 def fit_peaks(x, y, peaks: List[Peak], use_lmfit: bool = True) -> List[Peak]:
+    """
+    Wrapper: usa lmfit se disponível, senão cai no ajuste simples.
+    """
     if use_lmfit and LMFIT_AVAILABLE and len(peaks) > 0:
         return fit_peaks_lmfit_global(x, y, peaks, model_type="Voigt")
     for p in peaks:
@@ -382,6 +419,9 @@ def fit_peaks(x, y, peaks: List[Peak], use_lmfit: bool = True) -> List[Peak]:
     return peaks
 
 def infer_diseases(peaks: List[Peak]):
+    """
+    Aplica regras simples para sugerir “alterações” com base nos grupos presentes.
+    """
     groups_present = {p.group for p in peaks if p.group is not None}
     matches = []
     for rule in DISEASE_RULES:
@@ -399,12 +439,15 @@ def infer_diseases(peaks: List[Peak]):
     return matches
 
 # ---------------------------------------------------------------------
-# CALIBRAÇÃO
+# CALIBRAÇÃO (ROBUSTA, COM PAPEL)
 # ---------------------------------------------------------------------
 def apply_base_wavenumber_correction(
     x_obs: np.ndarray,
     base_poly_coeffs: np.ndarray,
 ) -> np.ndarray:
+    """
+    Aplica polinômio fixo de calibração (obtido previamente) ao eixo bruto.
+    """
     base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
     return np.polyval(base_poly_coeffs, x_obs)
 
@@ -417,8 +460,12 @@ def calibrate_with_fixed_pattern_and_silicon(
     progress_cb=None,
 ) -> Dict[str, Any]:
     """
-    Calibração com polinômio fixo + Silício.
-    Opcionalmente subtrai o espectro de papel (background).
+    Calibração com polinômio fixo + Silício (robusta).
+    - Tenta achar pico de Si em 480–560 cm-1; se não der, expande janela;
+      se ainda não der, detecta picos automaticamente.
+    - Se nada funcionar, usa delta = 0 e preenche 'calibration.warning'
+      ao invés de lançar erro.
+    - Se 'paper_file' for fornecido, faz subtração de background.
     """
     def tick(p, text=""):
         if progress_cb is not None:
@@ -432,43 +479,104 @@ def calibrate_with_fixed_pattern_and_silicon(
     }
 
     # 1) SILÍCIO
-    tick(10, "Carregando Silício...")
+    tick(5, "Carregando Silício...")
     x_si_raw, y_si_raw = load_spectrum(silicon_file)
+
     x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
 
-    tick(25, "Aplicando polinômio base ao Silício...")
+    tick(20, "Aplicando polinômio base ao Silício...")
     x_si_base = apply_base_wavenumber_correction(x_si, base_poly_coeffs)
 
+    # tentativa 1: janela 480-560
     mask_si = (x_si_base >= 480) & (x_si_base <= 560)
-    if not np.any(mask_si):
-        raise RuntimeError("Não há pontos suficientes na janela de Si (480–560 cm-1).")
 
-    idx_max = np.argmax(y_si[mask_si])
-    x_si_region = x_si_base[mask_si]
-    si_cal_base = float(x_si_region[idx_max])
+    si_cal_base: Optional[float] = None
+    warning: Optional[str] = None
 
-    delta = silicon_ref_position - si_cal_base
+    if np.any(mask_si):
+        idx_max = np.argmax(y_si[mask_si])
+        x_si_region = x_si_base[mask_si]
+        si_cal_base = float(x_si_region[idx_max])
+    else:
+        # tentativa 2: janela expandida 400-700
+        tick(30, "Janela Si vazia — expandindo janela (400–700 cm⁻¹)...")
+        mask_si2 = (x_si_base >= 400) & (x_si_base <= 700)
+        if np.any(mask_si2):
+            idx_max = np.argmax(y_si[mask_si2])
+            x_si_region = x_si_base[mask_si2]
+            si_cal_base = float(x_si_region[idx_max])
+        else:
+            # tentativa 3: busca automática de picos
+            tick(45, "Buscando picos de Si por detecção automática...")
+            try:
+                x_uniform = np.linspace(
+                    np.min(x_si_base), np.max(x_si_base),
+                    max(800, len(x_si_base))
+                )
+                y_uniform = np.interp(x_uniform, x_si_base, y_si)
+
+                lw = 11 if len(y_uniform) > 11 else (len(y_uniform) // 2) * 2 + 1
+                if lw >= 5:
+                    y_smooth = savgol_filter(y_uniform, lw, polyorder=3)
+                else:
+                    y_smooth = y_uniform
+
+                peaks_idx, props = find_peaks(
+                    y_smooth,
+                    height=np.max(y_smooth) * 0.1,
+                    distance=5,
+                    prominence=0.02,
+                )
+                if len(peaks_idx) > 0:
+                    distances = np.abs(x_uniform[peaks_idx] - silicon_ref_position)
+                    sel = peaks_idx[np.argmin(distances)]
+                    si_cal_base = float(x_uniform[sel])
+                else:
+                    warning = "Não foi possível localizar pico de Silício automaticamente (nenhum pico detectado)."
+            except Exception:
+                warning = "Erro ao tentar detectar pico de Silício automaticamente."
+
+    # se ainda não achou, delta = 0
+    if si_cal_base is None:
+        tick(60, "Não encontrado pico Si: usando delta = 0 e prosseguindo (ver warning).")
+        delta = 0.0
+        warning = warning or "Pico de Silício não encontrado; calibração fina por Si não aplicada."
+    else:
+        delta = float(silicon_ref_position) - float(si_cal_base)
 
     def corrector_final(x_arr: np.ndarray) -> np.ndarray:
         x_base = apply_base_wavenumber_correction(x_arr, base_poly_coeffs)
         return x_base + delta
 
-    # 2) AMOSTRA (+ PAPEL OPCIONAL)
-    tick(50, "Carregando amostra...")
+    # 2) AMOSTRA (+ PAPEL)
+    tick(65, "Carregando amostra...")
     x_s_raw, y_s_raw = load_spectrum(sample_file)
 
     if paper_file is not None:
-        tick(55, "Carregando papel (background)...")
+        tick(70, "Carregando papel (background) e subtraindo...")
         x_p_raw, y_p_raw = load_spectrum(paper_file)
-        y_p_interp = np.interp(x_s_raw, x_p_raw, y_p_raw)
-        y_s_raw = y_s_raw - y_p_interp
+        try:
+            y_p_interp = np.interp(x_s_raw, x_p_raw, y_p_raw)
+            y_s_raw = y_s_raw - y_p_interp
+        except Exception:
+            warning = (warning or "") + " Falha ao subtrair papel (interp)."
 
+    tick(80, "Pré-processando amostra (despike / baseline / smooth)...")
     x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
 
-    tick(75, "Aplicando calibração à amostra...")
+    tick(90, "Aplicando correção final ao eixo da amostra...")
     x_s_cal = corrector_final(x_s)
 
     tick(100, "Calibração concluída.")
+    calibration_info: Dict[str, Any] = {
+        "base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(),
+        "si_cal_base": float(si_cal_base) if si_cal_base is not None else None,
+        "silicon_ref_position": float(silicon_ref_position),
+        "laser_zero_delta": float(delta),
+    }
+    if warning:
+        calibration_info["warning"] = str(warning)
+
     return {
         "x_sample_raw": x_s_raw,
         "y_sample_raw": y_s_raw,
@@ -476,18 +584,16 @@ def calibrate_with_fixed_pattern_and_silicon(
         "y_sample_proc": y_s,
         "x_sample_calibrated": x_s_cal,
         "meta_sample": meta_s,
-        "calibration": {
-            "base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(),
-            "si_cal_base": si_cal_base,
-            "silicon_ref_position": float(silicon_ref_position),
-            "laser_zero_delta": delta,
-        },
+        "calibration": calibration_info,
     }
 
 # ---------------------------------------------------------------------
 # EXPORT HDF5
 # ---------------------------------------------------------------------
 def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) -> bytes:
+    """
+    Exporta espectro em um HDF5 simples no estilo NeXus.
+    """
     if not H5PY_AVAILABLE:
         raise RuntimeError("h5py não instalado.")
     bio = io.BytesIO()
