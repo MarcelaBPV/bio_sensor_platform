@@ -12,6 +12,8 @@ import pandas as pd
 from scipy.signal import find_peaks, savgol_filter, medfilt
 from scipy.ndimage import median_filter
 from scipy.optimize import curve_fit
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
 try:
     from lmfit.models import VoigtModel, GaussianModel, LorentzianModel
@@ -111,8 +113,12 @@ def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
 # ---------------------------------------------------------------------
 # DESPIKE
 # ---------------------------------------------------------------------
-def despike(y: np.ndarray, method: str = "median",
-            kernel_size: int = 5, z_thresh: float = 6.0) -> np.ndarray:
+def despike(
+    y: np.ndarray,
+    method: str = "median",
+    kernel_size: int = 5,
+    z_thresh: float = 6.0,
+) -> np.ndarray:
     y = y.copy()
     if method == "median":
         y_filtered = medfilt(y, kernel_size=kernel_size)
@@ -163,17 +169,30 @@ def compare_despike_algorithms(
 # ---------------------------------------------------------------------
 # BASELINE + PRÉ-PROCESSAMENTO
 # ---------------------------------------------------------------------
-def baseline_als(y: np.ndarray, lam: float = 1e5,
-                 p: float = 0.01, niter: int = 10) -> np.ndarray:
-    L = len(y)
-    D = np.diff(np.eye(L), 2)
-    H = lam * D.T.dot(D)
+def baseline_als(
+    y: np.ndarray,
+    lam: float = 1e5,
+    p: float = 0.01,
+    niter: int = 10,
+) -> np.ndarray:
+    """
+    Baseline ALS estável (versão esparsa).
+
+    Evita erros de broadcast do tipo (L,L) vs (L-2,L-2) na soma W + H.
+    """
+    y = np.asarray(y, dtype=float)
+    L = y.size
+
+    # matriz de segunda derivada (L-2, L)
+    D = sparse.diags([1, -2, 1], [0, 1, 2], shape=(L - 2, L))
     w = np.ones(L)
+
     for _ in range(niter):
-        W = np.diag(w)
-        Z = W + H
-        z = np.linalg.solve(Z, w * y)
+        W = sparse.spdiags(w, 0, L, L)
+        Z = W + lam * D.T.dot(D)
+        z = spsolve(Z, w * y)
         w = p * (y > z) + (1 - p) * (y < z)
+
     return z
 
 def baseline_fft_smooth(y: np.ndarray, cutoff_fraction: float = 0.02) -> np.ndarray:
@@ -394,8 +413,13 @@ def calibrate_with_fixed_pattern_and_silicon(
     sample_file,
     base_poly_coeffs: np.ndarray,
     silicon_ref_position: float = 520.7,
+    paper_file=None,
     progress_cb=None,
 ) -> Dict[str, Any]:
+    """
+    Calibração com polinômio fixo + Silício.
+    Opcionalmente subtrai o espectro de papel (background).
+    """
     def tick(p, text=""):
         if progress_cb is not None:
             progress_cb(p, text)
@@ -407,6 +431,7 @@ def calibrate_with_fixed_pattern_and_silicon(
         "normalize": False,
     }
 
+    # 1) SILÍCIO
     tick(10, "Carregando Silício...")
     x_si_raw, y_si_raw = load_spectrum(silicon_file)
     x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
@@ -428,8 +453,16 @@ def calibrate_with_fixed_pattern_and_silicon(
         x_base = apply_base_wavenumber_correction(x_arr, base_poly_coeffs)
         return x_base + delta
 
+    # 2) AMOSTRA (+ PAPEL OPCIONAL)
     tick(50, "Carregando amostra...")
     x_s_raw, y_s_raw = load_spectrum(sample_file)
+
+    if paper_file is not None:
+        tick(55, "Carregando papel (background)...")
+        x_p_raw, y_p_raw = load_spectrum(paper_file)
+        y_p_interp = np.interp(x_s_raw, x_p_raw, y_p_raw)
+        y_s_raw = y_s_raw - y_p_interp
+
     x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
 
     tick(75, "Aplicando calibração à amostra...")
