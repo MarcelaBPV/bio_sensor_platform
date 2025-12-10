@@ -187,13 +187,14 @@ def compute_association_gender_smoker_disease(
 # GRÁFICOS (BARRAS) USADOS NA ABA 1
 # ---------------------------------------------------------------------
 def plot_percentage_bar(series: pd.Series, title: str, ylabel: str = "% de pacientes"):
-    fig, ax = plt.subplots(figsize=(4, 4))
+    # Gráfico menor para caber ao lado da tabela
+    fig, ax = plt.subplots(figsize=(3, 2.5))
     labels = [str(i) for i in series.index]
     values = series.values
     ax.bar(labels, values)
-    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=9)
     ax.set_xlabel("")
-    ax.set_title(title, fontsize=11)
+    ax.set_title(title, fontsize=10)
     ax.set_ylim(0, max(100, values.max() * 1.1))
     for i, v in enumerate(values):
         ax.text(
@@ -202,15 +203,16 @@ def plot_percentage_bar(series: pd.Series, title: str, ylabel: str = "% de pacie
             f"{v:.1f}%",
             ha="center",
             va="bottom",
-            fontsize=8,
+            fontsize=7,
         )
+    plt.tight_layout()
     return fig
 
 def plot_association_bar(tab: pd.DataFrame, title: str = ""):
     """
     tab: linhas = Sexo, colunas = categorias de Fumante, valores = %
     """
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(4, 3))
     index = np.arange(len(tab.index))
     cols = list(tab.columns)
     ncols = len(cols)
@@ -226,8 +228,8 @@ def plot_association_bar(tab: pd.DataFrame, title: str = ""):
 
     ax.set_xticks(index + width * (ncols - 1) / 2 if ncols > 1 else index)
     ax.set_xticklabels(tab.index)
-    ax.set_ylabel("% de pacientes com doença")
-    ax.set_title(title or "Associação sexo × fumante entre pacientes com doença")
+    ax.set_ylabel("% de pacientes com doença", fontsize=9)
+    ax.set_title(title or "Associação sexo × fumante (com doença)", fontsize=10)
     ax.set_ylim(0, 100)
 
     for i, sexo in enumerate(tab.index):
@@ -239,10 +241,11 @@ def plot_association_bar(tab: pd.DataFrame, title: str = ""):
                 f"{v:.1f}%",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=7,
             )
 
-    ax.legend(title="Fumante")
+    ax.legend(title="Fumante", fontsize=8, title_fontsize=9)
+    plt.tight_layout()
     return fig
 
 # ---------------------------------------------------------------------
@@ -670,7 +673,7 @@ def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) 
 # INTERFACE – ABAS
 # ---------------------------------------------------------------------
 st.title("Plataforma Bio-Raman")
-tab_pacientes, tab_raman = st.tabs(["🧑‍⚕️ Pacientes & Formulários", "🔬 Raman & Correlação"])
+tab_pacientes, tab_raman = st.tabs(["1 Pacientes & Formulários", "2 Raman & Correlação"])
 
 # ABA 1 – PACIENTES
 with tab_pacientes:
@@ -726,35 +729,44 @@ with tab_pacientes:
             st.subheader("Resumo estatístico")
             st.markdown(f"**Total de registros:** {len(df_pac)}")
 
-            # Sexo – só barras
+            # Sexo – tabela + barras lado a lado
             if "sexo" in stats:
                 st.markdown("### Distribuição de sexo/gênero (%)")
-                st.dataframe(stats["sexo"])
-                fig_sexo_bar = plot_percentage_bar(
-                    stats["sexo"]["percentual"],
-                    "Sexo/gênero – barras",
-                )
-                st.pyplot(fig_sexo_bar)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.dataframe(stats["sexo"])
+                with c2:
+                    fig_sexo_bar = plot_percentage_bar(
+                        stats["sexo"]["percentual"],
+                        "Sexo/gênero – barras",
+                    )
+                    st.pyplot(fig_sexo_bar)
 
-            # Fumante – só barras
+            # Fumante – tabela + barras lado a lado
             if "fumante" in stats:
                 st.markdown("### Fumante (%)")
-                st.dataframe(stats["fumante"])
-                fig_fum_bar = plot_percentage_bar(
-                    stats["fumante"]["percentual"],
-                    "Fumante – barras",
-                )
-                st.pyplot(fig_fum_bar)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.dataframe(stats["fumante"])
+                with c2:
+                    fig_fum_bar = plot_percentage_bar(
+                        stats["fumante"]["percentual"],
+                        "Fumante – barras",
+                    )
+                    st.pyplot(fig_fum_bar)
 
-            # Doença – só barras
+            # Doença – tabela + barras lado a lado
             if "doenca" in stats:
                 st.markdown("### Alguma doença declarada (%)")
-                st.dataframe(stats["doenca"])
-                fig_doenc_bar = plot_percentage_bar(
-                    stats["doenca"]["percentual"],
-                    "Doença declarada – barras",
-                )
-                st.pyplot(fig_doenc_bar)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.dataframe(stats["doenca"])
+                with c2:
+                    fig_doenc_bar = plot_percentage_bar(
+                        stats["doenca"]["percentual"],
+                        "Doença declarada – barras",
+                    )
+                    st.pyplot(fig_doenc_bar)
 
             # Associação sexo × fumante entre quem declarou doença
             assoc_tab = compute_association_gender_smoker_disease(
@@ -766,12 +778,15 @@ with tab_pacientes:
                     "Tabela e gráfico mostram, entre os pacientes COM doença declarada, "
                     "a distribuição percentual por sexo e status de fumante."
                 )
-                st.dataframe(assoc_tab)
-                fig_assoc = plot_association_bar(
-                    assoc_tab,
-                    "Pacientes com doença declarada – % por sexo × fumante",
-                )
-                st.pyplot(fig_assoc)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.dataframe(assoc_tab)
+                with c2:
+                    fig_assoc = plot_association_bar(
+                        assoc_tab,
+                        "Pacientes com doença – % por sexo × fumante",
+                    )
+                    st.pyplot(fig_assoc)
             else:
                 st.info(
                     "Não foi possível calcular a associação (faltam colunas mapeadas "
