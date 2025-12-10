@@ -9,6 +9,7 @@ Aba 2: Raman & Correlação (pipeline tipo Figura 1: despike, baseline,
 
 from typing import List, Tuple, Dict, Optional, Any
 import json
+import io
 
 import numpy as np
 import pandas as pd
@@ -458,7 +459,6 @@ with tab_raman:
             progress.empty()
             st.success("Pipeline Raman concluído.")
 
-            # Mostra aviso de calibração, se houver
             calib_warning = res.get("calibration", {}).get("warning")
             if calib_warning:
                 st.warning(f"Aviso na calibração: {calib_warning}")
@@ -532,21 +532,38 @@ with tab_raman:
         if not sample_file:
             st.error("Carregue pelo menos o espectro da amostra.")
         else:
+            # 1) Ler amostra uma vez
             x_raw, y_raw = rp.load_spectrum(sample_file)
             x_proc, y_proc, meta = rp.preprocess_spectrum(x_raw, y_raw)
             despike_metrics = meta.get("despike_metrics", {})
             if not despike_metrics:
                 _, _, despike_metrics = rp.compare_despike_algorithms(y_raw)
 
+            # 2) Tentar usar calibração, mas com cópias (BytesIO) dos arquivos
             if coeffs_str.strip() and si_file is not None:
                 try:
                     base_poly_coeffs = np.fromstring(coeffs_str, sep=",")
+                    if base_poly_coeffs.size == 0:
+                        raise ValueError("Nenhum coeficiente encontrado.")
+
+                    # criar cópias em memória com ponteiro no início
+                    si_buf = io.BytesIO(si_file.getvalue())
+                    si_buf.name = si_file.name
+
+                    sample_buf = io.BytesIO(sample_file.getvalue())
+                    sample_buf.name = sample_file.name
+
+                    paper_buf = None
+                    if paper_file is not None:
+                        paper_buf = io.BytesIO(paper_file.getvalue())
+                        paper_buf.name = paper_file.name
+
                     res_tmp = rp.calibrate_with_fixed_pattern_and_silicon(
-                        silicon_file=si_file,
-                        sample_file=sample_file,
+                        silicon_file=si_buf,
+                        sample_file=sample_buf,
                         base_poly_coeffs=base_poly_coeffs,
                         silicon_ref_position=float(silicon_ref_value),
-                        paper_file=paper_file,
+                        paper_file=paper_buf,
                     )
                     x_cal = res_tmp["x_sample_calibrated"]
                     y_cal = res_tmp["y_sample_proc"]
