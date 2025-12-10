@@ -1,551 +1,619 @@
-# app.py
+# raman_processing.py
 # -*- coding: utf-8 -*-
-"""
-Plataforma Bio-Raman com cadastro de pacientes e pipeline harmonizado.
-Aba 1: Pacientes & Formulários
-Aba 2: Raman & Correlação (pipeline tipo Figura 1: despike, baseline,
-       smoothing, peak fitting, calibração com Si e gráfico multi-painel)
-"""
 
-from typing import List, Tuple, Dict, Optional, Any
+import io
 import json
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Optional, Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 
-# importa TODA a lógica Raman do módulo raman_processing.py
-import raman_processing as rp
+from scipy.signal import find_peaks, savgol_filter, medfilt
+from scipy.ndimage import median_filter
+from scipy.optimize import curve_fit
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
-# ---------------------------------------------------------------------
-# CONFIG STREAMLIT
-# ---------------------------------------------------------------------
-st.set_page_config(page_title="Plataforma Bio-Raman", layout="wide")
+try:
+    from lmfit.models import VoigtModel, GaussianModel, LorentzianModel
+    LMFIT_AVAILABLE = True
+except Exception:
+    LMFIT_AVAILABLE = False
 
-# ---------------------------------------------------------------------
-# FUNÇÕES ABA 1 (PACIENTES)
-# ---------------------------------------------------------------------
-def load_patient_table(file) -> pd.DataFrame:
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        df = pd.read_csv(file)
-    elif name.endswith((".xls", ".xlsx")):
-        df = pd.read_excel(file)
-    else:
-        df = pd.read_csv(file)
-    return df
-
-def guess_gender_column(df: pd.DataFrame) -> Optional[str]:
-    candidates = [
-        c for c in df.columns
-        if any(k in c.lower() for k in ["sexo", "gênero", "genero", "sex", "gender"])
-    ]
-    return candidates[0] if candidates else None
-
-def guess_smoker_column(df: pd.DataFrame) -> Optional[str]:
-    candidates = [
-        c for c in df.columns
-        if any(k in c.lower() for k in ["fuma", "fumante", "smoker"])
-    ]
-    return candidates[0] if candidates else None
-
-def guess_disease_column(df: pd.DataFrame) -> Optional[str]:
-    keys = ["doença", "doenca", "doencas", "comorb", "diagnostico", "diagnóstico", "disease"]
-    candidates = [c for c in df.columns if any(k in c.lower() for k in keys)]
-    return candidates[0] if candidates else None
-
-def normalize_gender(value) -> str:
-    if pd.isna(value):
-        return "Não informado"
-    v = str(value).strip().lower()
-    if v in ["f", "fem", "feminino", "female", "woman", "mulher"]:
-        return "Feminino"
-    if v in ["m", "masc", "masculino", "male", "man", "homem"]:
-        return "Masculino"
-    return "Não informado"
-
-def normalize_yesno(value) -> str:
-    if pd.isna(value):
-        return "Não informado"
-    v = str(value).strip().lower()
-    if v in ["sim", "s", "yes", "y", "1", "true", "verdadeiro"]:
-        return "Sim"
-    if v in ["não", "nao", "n", "no", "0", "false", "falso"]:
-        return "Não"
-    return "Não informado"
-
-def compute_patient_stats(
-    df: pd.DataFrame,
-    col_gender: Optional[str],
-    col_smoker: Optional[str],
-    col_disease: Optional[str],
-) -> Dict[str, pd.DataFrame]:
-    stats: Dict[str, pd.DataFrame] = {}
-    if col_gender:
-        g_norm = df[col_gender].map(normalize_gender)
-        stats["sexo"] = (
-            g_norm.value_counts(normalize=True) * 100
-        ).round(1).rename("percentual").to_frame()
-    if col_smoker:
-        s_norm = df[col_smoker].map(normalize_yesno)
-        stats["fumante"] = (
-            s_norm.value_counts(normalize=True) * 100
-        ).round(1).rename("percentual").to_frame()
-    if col_disease:
-        d_norm = df[col_disease].map(normalize_yesno)
-        stats["doenca"] = (
-            d_norm.value_counts(normalize=True) * 100
-        ).round(1).rename("percentual").to_frame()
-    return stats
-
-def compute_association_gender_smoker_disease(
-    df: pd.DataFrame,
-    col_gender: Optional[str],
-    col_smoker: Optional[str],
-    col_disease: Optional[str],
-) -> Optional[pd.DataFrame]:
-    if not (col_gender and col_smoker and col_disease):
-        return None
-
-    g_norm = df[col_gender].map(normalize_gender)
-    s_norm = df[col_smoker].map(normalize_yesno)
-    d_norm = df[col_disease].map(normalize_yesno)
-
-    df_norm = pd.DataFrame({"Sexo": g_norm, "Fumante": s_norm, "Doenca": d_norm})
-    df_pos = df_norm[df_norm["Doenca"] == "Sim"].copy()
-    if df_pos.empty:
-        return None
-
-    tab = pd.crosstab(
-        df_pos["Sexo"],
-        df_pos["Fumante"],
-        normalize="index",
-    ) * 100.0
-    return tab.round(1)
-
-def plot_percentage_bar(series: pd.Series, title: str, ylabel: str = "% de pacientes"):
-    fig, ax = plt.subplots(figsize=(3, 2.5))
-    labels = [str(i) for i in series.index]
-    values = series.values
-    ax.bar(labels, values)
-    ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_xlabel("")
-    ax.set_title(title, fontsize=10)
-    ax.set_ylim(0, max(100, values.max() * 1.1))
-    for i, v in enumerate(values):
-        ax.text(i, v + max(values) * 0.02, f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
-    plt.tight_layout()
-    return fig
-
-def plot_association_bar(tab: pd.DataFrame, title: str = ""):
-    fig, ax = plt.subplots(figsize=(4, 3))
-    index = np.arange(len(tab.index))
-    cols = list(tab.columns)
-    ncols = len(cols)
-    width = 0.8 / max(ncols, 1)
-
-    for i, col in enumerate(cols):
-        ax.bar(index + i * width, tab[col].values, width, label=str(col))
-
-    ax.set_xticks(index + width * (ncols - 1) / 2 if ncols > 1 else index)
-    ax.set_xticklabels(tab.index)
-    ax.set_ylabel("% de pacientes com doença", fontsize=9)
-    ax.set_title(title or "Associação sexo × fumante (com doença)", fontsize=10)
-    ax.set_ylim(0, 100)
-
-    for i, sexo in enumerate(tab.index):
-        for j, col in enumerate(cols):
-            v = tab.loc[sexo, col]
-            ax.text(i + j * width, v + 1, f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
-
-    ax.legend(title="Fumante", fontsize=8, title_fontsize=9)
-    plt.tight_layout()
-    return fig
+try:
+    import h5py
+    H5PY_AVAILABLE = True
+except Exception:
+    H5PY_AVAILABLE = False
 
 # ---------------------------------------------------------------------
-# FUNÇÃO DE FIGURA TIPO (a–g) USANDO raman_processing
+# MAPA MOLECULAR E REGRAS
 # ---------------------------------------------------------------------
-def plot_pipeline_panels(
-    x_raw: np.ndarray,
-    y_raw: np.ndarray,
-    x_proc: np.ndarray,
-    y_proc: np.ndarray,
-    x_cal: np.ndarray,
-    y_cal: np.ndarray,
-    peaks: List[rp.Peak],
-    despike_metrics: Dict[str, float],
-):
-    fig = plt.figure(figsize=(11, 10))
-    gs = GridSpec(4, 3, figure=fig, wspace=0.7, hspace=0.9)
+MOLECULAR_MAP = [
+    {"range": (700, 740), "group": "Hemoglobina / porfirinas"},
+    {"range": (995, 1005), "group": "Fenilalanina (anéis aromáticos)"},
+    {"range": (1440, 1470), "group": "Lipídios / CH2 deformação"},
+    {"range": (1650, 1670), "group": "Amidas / proteínas (C=O)"},
+]
 
-    # a) Synthetic / Raw
-    ax_a = fig.add_subplot(gs[0, 0])
-    ax_a.plot(x_raw, y_raw, lw=0.8)
-    ax_a.set_title("a) Synthetic / Raw")
-    ax_a.set_xlabel("Wavenumber / cm⁻¹")
-    ax_a.set_ylabel("Intensity")
-
-    # b) Spike removal + métricas
-    ax_b = fig.add_subplot(gs[0, 1])
-    y_med, _, _ = rp.compare_despike_algorithms(y_raw)
-    ax_b.plot(x_raw, y_raw, lw=0.5, label="raw")
-    ax_b.plot(x_raw, y_med, lw=0.9, label="despiked")
-    ax_b.set_title("b) Spike removal")
-    ax_b.set_xlabel("Wavenumber / cm⁻¹")
-    ax_b.legend(fontsize=7)
-
-    ax_bm = fig.add_subplot(gs[0, 2])
-    methods = list(despike_metrics.keys())
-    vals = [despike_metrics[m] for m in methods]
-    ax_bm.bar(np.arange(len(methods)), vals)
-    ax_bm.set_xticks(np.arange(len(methods)))
-    ax_bm.set_xticklabels(methods, rotation=45, fontsize=7)
-    ax_bm.set_title("Metric vs algorithms")
-
-    # c) Baseline
-    ax_c = fig.add_subplot(gs[1, 0])
-    base = rp.baseline_als(y_med)
-    ax_c.plot(x_raw, y_med, lw=0.8, label="despiked")
-    ax_c.plot(x_raw, base, lw=0.8, label="baseline")
-    ax_c.set_title("c) Baseline calculation")
-    ax_c.set_xlabel("Wavenumber / cm⁻¹")
-    ax_c.legend(fontsize=7)
-
-    # d) Smoothing
-    ax_d = fig.add_subplot(gs[1, 1])
-    ax_d.plot(x_raw, y_med, lw=0.5, label="before")
-    ax_d.plot(x_proc, y_proc, lw=0.9, label="after SG")
-    ax_d.set_title("d) Smoothing")
-    ax_d.set_xlabel("Wavenumber / cm⁻¹")
-    ax_d.legend(fontsize=7)
-
-    # e) Peak fitting
-    ax_e = fig.add_subplot(gs[1, 2])
-    ax_e.plot(x_cal, y_cal, lw=0.9)
-    for p in peaks:
-        ax_e.axvline(p.position_cm1, color="r", lw=0.6, alpha=0.8)
-        ax_e.plot(p.position_cm1, p.intensity, "ro", ms=3)
-    ax_e.set_title("e) Peak fitting")
-    ax_e.set_xlabel("Raman shift / cm⁻¹")
-
-    # f) Wavenumber calibration
-    ax_f = fig.add_subplot(gs[2, :])
-    ax_f.plot(x_proc, y_proc, lw=0.7, label="processado (eixo bruto)")
-    ax_f.plot(x_cal, y_proc, lw=0.9, label="processado (eixo calibrado)")
-    ax_f.set_title("f) Wavenumber calibration (Si + polinômio)")
-    ax_f.set_xlabel("Raman shift / cm⁻¹")
-    ax_f.legend(fontsize=8)
-
-    # g) “Coding example” – só texto
-    ax_g = fig.add_subplot(gs[3, :])
-    ax_g.axis("off")
-    code = (
-        "spec = rp.load_spectrum('spectrum.txt')\n"
-        "x, y = spec\n"
-        "x, y_proc, meta = rp.preprocess_spectrum(x, y)\n"
-        "peaks = rp.detect_peaks(x, y_proc)\n"
-        "peaks = rp.fit_peaks(x, y_proc, peaks)"
-    )
-    ax_g.text(0.01, 0.9, code, family="monospace", fontsize=9, va="top")
-
-    fig.suptitle("Pipeline Raman – visão estilo Figura 1", fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    return fig
+DISEASE_RULES = [
+    {
+        "name": "Alteração hemoglobina",
+        "description": "Padrão compatível com alterações em heme / porfirinas.",
+        "groups_required": ["Hemoglobina / porfirinas"],
+    },
+    {
+        "name": "Alteração proteica",
+        "description": "Padrão compatível com alterações em proteínas (amida I).",
+        "groups_required": ["Amidas / proteínas (C=O)"],
+    },
+    {
+        "name": "Alteração lipídica",
+        "description": "Padrão compatível com alterações em lipídios de membrana.",
+        "groups_required": ["Lipídios / CH2 deformação"],
+    },
+]
 
 # ---------------------------------------------------------------------
-# INTERFACE – ABAS
+# DATACLASS PARA PICOS
 # ---------------------------------------------------------------------
-st.title("Plataforma Bio-Raman")
-tab_pacientes, tab_raman = st.tabs(["1 Pacientes & Formulários", "2 Raman & Correlação"])
+@dataclass
+class Peak:
+    position_cm1: float
+    intensity: float
+    width: Optional[float] = None
+    group: Optional[str] = None
+    fit_params: Optional[Dict[str, Any]] = None
 
-# ======================= ABA 1 – PACIENTES ===========================
-with tab_pacientes:
-    st.header("Cadastro de pacientes via planilha")
-    patient_file = st.file_uploader(
-        "Carregar planilha de pacientes (XLS, XLSX ou CSV)",
-        type=["xls", "xlsx", "csv"],
-    )
-    if patient_file:
-        df_pac = load_patient_table(patient_file)
-        st.subheader("Pré-visualização da planilha")
-        st.dataframe(df_pac.head())
-
-        st.subheader("Mapeamento de colunas")
-        cols = list(df_pac.columns)
-        default_gender = guess_gender_column(df_pac)
-        default_smoker = guess_smoker_column(df_pac)
-        default_disease = guess_disease_column(df_pac)
-
-        col_g, col_s, col_d = st.columns(3)
-        with col_g:
-            col_gender = st.selectbox(
-                "Coluna de sexo/gênero",
-                options=["(nenhuma)"] + cols,
-                index=(cols.index(default_gender) + 1) if default_gender in cols else 0,
+# ---------------------------------------------------------------------
+# LEITURA DE ESPECTROS
+# ---------------------------------------------------------------------
+def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Lê arquivo de espectro (txt, csv, xls/xlsx) e retorna (x, y) como numpy arrays.
+    Tenta detectar automaticamente separador e ignora colunas não numéricas.
+    """
+    filename = getattr(file_like, "name", "").lower()
+    try:
+        if filename.endswith(".txt"):
+            df = pd.read_csv(
+                file_like,
+                sep=r"\s+",
+                comment="#",
+                engine="python",
+                header=None,
             )
-            col_gender = None if col_gender == "(nenhuma)" else col_gender
-        with col_s:
-            col_smoker = st.selectbox(
-                "Coluna de fumante (sim/não)",
-                options=["(nenhuma)"] + cols,
-                index=(cols.index(default_smoker) + 1) if default_smoker in cols else 0,
-            )
-            col_smoker = None if col_smoker == "(nenhuma)" else col_smoker
-        with col_d:
-            col_disease = st.selectbox(
-                "Coluna de 'tem alguma doença?' (sim/não)",
-                options=["(nenhuma)"] + cols,
-                index=(cols.index(default_disease) + 1) if default_disease in cols else 0,
-            )
-            col_disease = None if col_disease == "(nenhuma)" else col_disease
-
-        if st.button("Calcular estatísticas dos pacientes"):
-            stats = compute_patient_stats(df_pac, col_gender, col_smoker, col_disease)
-            st.subheader("Resumo estatístico")
-            st.markdown(f"**Total de registros:** {len(df_pac)}")
-
-            if "sexo" in stats:
-                st.markdown("### Distribuição de sexo/gênero (%)")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.dataframe(stats["sexo"])
-                with c2:
-                    fig_sexo_bar = plot_percentage_bar(
-                        stats["sexo"]["percentual"], "Sexo/gênero – barras"
-                    )
-                    st.pyplot(fig_sexo_bar)
-
-            if "fumante" in stats:
-                st.markdown("### Fumante (%)")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.dataframe(stats["fumante"])
-                with c2:
-                    fig_fum_bar = plot_percentage_bar(
-                        stats["fumante"]["percentual"], "Fumante – barras"
-                    )
-                    st.pyplot(fig_fum_bar)
-
-            if "doenca" in stats:
-                st.markdown("### Alguma doença declarada (%)")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.dataframe(stats["doenca"])
-                with c2:
-                    fig_doenc_bar = plot_percentage_bar(
-                        stats["doenca"]["percentual"], "Doença declarada – barras"
-                    )
-                    st.pyplot(fig_doenc_bar)
-
-            assoc_tab = compute_association_gender_smoker_disease(
-                df_pac, col_gender, col_smoker, col_disease
-            )
-            st.markdown("### Associação entre sexo, tabagismo e presença de doença")
-            if assoc_tab is not None:
-                st.caption(
-                    "Tabela e gráfico mostram, entre os pacientes COM doença declarada, "
-                    "a distribuição percentual por sexo e status de fumante."
-                )
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.dataframe(assoc_tab)
-                with c2:
-                    fig_assoc = plot_association_bar(
-                        assoc_tab, "Pacientes com doença – % por sexo × fumante"
-                    )
-                    st.pyplot(fig_assoc)
-            else:
-                st.info(
-                    "Não foi possível calcular a associação (faltam colunas mapeadas "
-                    "ou não há pacientes com doença = 'Sim')."
-                )
-
-            st.caption(
-                "Obs.: 'Não informado' inclui valores vazios, nulos ou não reconhecidos."
-            )
-
-# ======================= ABA 2 – RAMAN ===============================
-with tab_raman:
-    st.header("Pipeline Raman – calibração, picos e correlação")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Arquivos de espectros")
-        sample_file = st.file_uploader(
-            "Amostra (sangue em papel, etc.)", type=["txt", "csv", "xlsx"]
-        )
-        paper_file = st.file_uploader(
-            "Papel / substrato (background)", type=["txt", "csv", "xlsx"]
-        )
-        si_file = st.file_uploader(
-            "Silício (padrão para ajuste fino)", type=["txt", "csv", "xlsx"]
-        )
-
-    with col2:
-        st.subheader("Configurações do processamento")
-        use_lmfit = st.checkbox(
-            "Usar lmfit (ajuste multi-peak Voigt)", value=rp.LMFIT_AVAILABLE
-        )
-        silicon_ref_value = st.number_input(
-            "Posição de referência do pico do Silício (cm⁻¹)",
-            value=520.7,
-            format="%.2f",
-        )
-        coeffs_str = st.text_input(
-            "Coeficientes do polinômio base (np.polyfit, separados por vírgula)",
-            help="Ex.: 1.2e-7, -0.03, 550.0",
-        )
-
-    st.markdown("---")
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        run_raman = st.button("Executar pipeline Raman completo")
-    with col_btn2:
-        run_fig = st.button("Mostrar figura tipo (a–g)")
-
-    # -------- Pipeline principal ----------
-    if run_raman:
-        if not sample_file:
-            st.error("Carregue o espectro da amostra.")
-        elif not si_file:
-            st.error("Carregue o espectro de Silício.")
-        elif not coeffs_str.strip():
-            st.error("Informe os coeficientes do polinômio base.")
-        else:
+        elif filename.endswith(".csv"):
             try:
-                base_poly_coeffs = np.fromstring(coeffs_str, sep=",")
-                if base_poly_coeffs.size == 0:
-                    raise ValueError("Nenhum coeficiente encontrado.")
-            except Exception as e:
-                st.error(f"Erro ao interpretar os coeficientes do polinômio base: {e}")
-                st.stop()
-
-            progress = st.progress(0, text="Iniciando pipeline...")
-
-            def set_progress(p, text=""):
-                progress.progress(int(p), text=text)
-
-            with st.spinner("Processando espectros..."):
-                try:
-                    res = rp.calibrate_with_fixed_pattern_and_silicon(
-                        silicon_file=si_file,
-                        sample_file=sample_file,
-                        base_poly_coeffs=base_poly_coeffs,
-                        silicon_ref_position=float(silicon_ref_value),
-                        paper_file=paper_file,
-                        progress_cb=set_progress,
-                    )
-                except Exception as e:
-                    progress.empty()
-                    st.error(f"Erro no pipeline Raman: {e}")
-                    st.exception(e)
-                    st.stop()
-
-            progress.empty()
-            st.success("Pipeline Raman concluído.")
-
-            x_raw = res["x_sample_raw"]
-            y_raw = res["y_sample_raw"]
-            x_proc = res["x_sample_proc"]
-            y_proc = res["y_sample_proc"]
-            x_cal = res["x_sample_calibrated"]
-
-            fig, axs = plt.subplots(1, 2, figsize=(13, 4), constrained_layout=True)
-            axs[0].plot(x_raw, y_raw, lw=0.6, label="Raw")
-            axs[0].plot(x_proc, y_proc, lw=0.9, label="Processado")
-            axs[0].set_xlabel("Eixo bruto (unidades do equipamento)")
-            axs[0].set_title("Raw vs Processado")
-            axs[0].legend()
-
-            axs[1].plot(x_cal, y_proc, lw=0.9)
-            axs[1].set_xlabel("Deslocamento Raman (cm⁻¹, calibrado)")
-            axs[1].set_title("Processado no eixo calibrado (padrão fixo + Si)")
-
-            st.pyplot(fig)
-
-            peaks = rp.detect_peaks(x_cal, y_proc, height=0.05, distance=5, prominence=0.02)
-            peaks = rp.fit_peaks(x_cal, y_proc, peaks, use_lmfit=use_lmfit)
-            peaks = rp.map_peaks_to_molecular_groups(peaks)
-            diseases = rp.infer_diseases(peaks)
-
-            st.subheader("Picos detectados e ajustados (eixo calibrado)")
-            if peaks:
-                df_peaks = pd.DataFrame(
-                    [
-                        {
-                            "position_cm-1": p.position_cm1,
-                            "intensity": p.intensity,
-                            "width": p.width or "",
-                            "group": p.group,
-                            "fit_params": json.dumps(p.fit_params)
-                            if p.fit_params
-                            else "",
-                        }
-                        for p in peaks
-                    ]
-                )
-                st.dataframe(df_peaks)
-            else:
-                st.info("Nenhum pico detectado com os parâmetros atuais.")
-
-            st.subheader("Correlação com padrões de 'doenças' (modo pesquisa)")
-            st.caption("⚠ Uso exploratório / pesquisa. NÃO é diagnóstico médico.")
-            if diseases:
-                st.table(pd.DataFrame(diseases))
-            else:
-                st.write("Nenhum padrão identificado com as regras atuais.")
-
-            if rp.H5PY_AVAILABLE:
-                bytes_h5 = rp.save_to_nexus_bytes(
-                    x_cal, y_proc, {"calibration": json.dumps(res["calibration"])}
-                )
-                st.download_button(
-                    "Baixar espectro calibrado (NeXus-like .h5)",
-                    data=bytes_h5,
-                    file_name="sample_calibrated.h5",
-                    mime="application/octet-stream",
-                )
-            else:
-                st.info("Instale 'h5py' para habilitar export HDF5: pip install h5py")
-
-    # -------- Figura tipo a–g ----------
-    if run_fig:
-        if not sample_file:
-            st.error("Carregue pelo menos o espectro da amostra.")
+                df = pd.read_csv(file_like)
+            except Exception:
+                file_like.seek(0)
+                df = pd.read_csv(file_like, sep=";")
+        elif filename.endswith((".xls", ".xlsx")):
+            df = pd.read_excel(file_like)
         else:
-            x_raw, y_raw = rp.load_spectrum(sample_file)
-            x_proc, y_proc, meta = rp.preprocess_spectrum(x_raw, y_raw)
-            despike_metrics = meta.get("despike_metrics", {})
-            if not despike_metrics:
-                _, _, despike_metrics = rp.compare_despike_algorithms(y_raw)
-
-            if coeffs_str.strip() and si_file is not None:
-                base_poly_coeffs = np.fromstring(coeffs_str, sep=",")
-                res_tmp = rp.calibrate_with_fixed_pattern_and_silicon(
-                    silicon_file=si_file,
-                    sample_file=sample_file,
-                    base_poly_coeffs=base_poly_coeffs,
-                    silicon_ref_position=float(silicon_ref_value),
-                    paper_file=paper_file,
-                )
-                x_cal = res_tmp["x_sample_calibrated"]
-                y_cal = res_tmp["y_sample_proc"]
-            else:
-                x_cal, y_cal = x_proc, y_proc
-
-            peaks = rp.detect_peaks(x_cal, y_cal, height=0.05, distance=5, prominence=0.02)
-            peaks = rp.fit_peaks(x_cal, y_cal, peaks, use_lmfit=use_lmfit)
-
-            fig_pipeline = plot_pipeline_panels(
-                x_raw, y_raw, x_proc, y_proc, x_cal, y_cal, peaks, despike_metrics
+            file_like.seek(0)
+            df = pd.read_csv(
+                file_like,
+                sep=r"\s+",
+                comment="#",
+                engine="python",
+                header=None,
             )
-            st.pyplot(fig_pipeline)
+    except Exception as e:
+        raise RuntimeError(f"Erro ao ler arquivo de espectro: {e}")
 
-# Rodapé
-st.markdown("---")
-st.caption(
-    "Aba 1: cadastro e estatísticas de pacientes • "
-    "Aba 2: Raman harmonizado + calibração fixa + Si + visualização estilo Figura 1."
-)
+    df = df.dropna(axis=1, how="all")
+    numeric_df = df.select_dtypes(include=[np.number])
+    if numeric_df.shape[1] >= 2:
+        x = numeric_df.iloc[:, 0].to_numpy(dtype=float)
+        y = numeric_df.iloc[:, 1].to_numpy(dtype=float)
+    else:
+        x = df.iloc[:, 0].astype(float).to_numpy()
+        y = df.iloc[:, 1].astype(float).to_numpy()
+    return x, y
+
+# ---------------------------------------------------------------------
+# DESPIKE
+# ---------------------------------------------------------------------
+def despike(
+    y: np.ndarray,
+    method: str = "median",
+    kernel_size: int = 5,
+    z_thresh: float = 6.0,
+) -> np.ndarray:
+    """
+    Remove spikes do espectro por diferentes métodos.
+    """
+    y = y.copy()
+    if method == "median":
+        y_filtered = medfilt(y, kernel_size=kernel_size)
+        mask = np.abs(y - y_filtered) > (np.std(y) * 3)
+        y[mask] = y_filtered[mask]
+        return y
+    elif method == "zscore":
+        mu = pd.Series(y).rolling(
+            window=kernel_size, center=True, min_periods=1
+        ).median().to_numpy()
+        resid = y - mu
+        z = np.abs(resid) / (np.std(resid) + 1e-12)
+        y[z > z_thresh] = mu[z > z_thresh]
+        return y
+    elif method == "median_filter_nd":
+        return median_filter(y, size=kernel_size)
+    else:
+        raise ValueError("Método despike desconhecido")
+
+def _despike_metric(y_original: np.ndarray, y_despiked: np.ndarray) -> float:
+    second_deriv = np.diff(y_despiked, n=2)
+    smooth_term = np.mean(np.abs(second_deriv))
+    mse = np.mean((y_original - y_despiked) ** 2)
+    alpha = 0.1 / (np.var(y_original) + 1e-12)
+    return float(smooth_term + alpha * mse)
+
+def compare_despike_algorithms(
+    y: np.ndarray,
+    methods: Optional[List[str]] = None,
+    kernel_size: int = 5,
+):
+    """
+    Compara algoritmos de despike e retorna:
+    (melhor_espectro, melhor_método, dicionário_métricas)
+    """
+    if methods is None:
+        methods = ["median", "zscore", "median_filter_nd"]
+    metrics: Dict[str, float] = {}
+    best_metric = np.inf
+    best_y = y.copy()
+    best_method = None
+    for m in methods:
+        y_d = despike(y, method=m, kernel_size=kernel_size)
+        metric = _despike_metric(y, y_d)
+        metrics[m] = metric
+        if metric < best_metric:
+            best_metric = metric
+            best_y = y_d
+            best_method = m
+    return best_y, best_method, metrics
+
+# ---------------------------------------------------------------------
+# BASELINE + PRÉ-PROCESSAMENTO
+# ---------------------------------------------------------------------
+def baseline_als(
+    y: np.ndarray,
+    lam: float = 1e5,
+    p: float = 0.01,
+    niter: int = 10,
+) -> np.ndarray:
+    """
+    Baseline ALS estável (versão esparsa).
+
+    Evita erros de broadcast do tipo (L,L) vs (L-2,L-2) na soma W + H.
+    """
+    y = np.asarray(y, dtype=float)
+    L = y.size
+
+    # matriz de segunda derivada (L-2, L)
+    D = sparse.diags([1, -2, 1], [0, 1, 2], shape=(L - 2, L))
+    w = np.ones(L)
+
+    for _ in range(niter):
+        W = sparse.spdiags(w, 0, L, L)
+        Z = W + lam * D.T.dot(D)
+        z = spsolve(Z, w * y)
+        w = p * (y > z) + (1 - p) * (y < z)
+
+    return z
+
+def baseline_fft_smooth(y: np.ndarray, cutoff_fraction: float = 0.02) -> np.ndarray:
+    Y = np.fft.rfft(y)
+    n = len(Y)
+    cutoff = max(1, int(n * cutoff_fraction))
+    Y[cutoff:-cutoff] = 0
+    baseline = np.fft.irfft(Y, n=len(y))
+    return baseline
+
+def preprocess_spectrum(
+    x: np.ndarray,
+    y: np.ndarray,
+    despike_method: Optional[str] = "auto_compare",
+    smooth: bool = True,
+    window_length: int = 9,
+    polyorder: int = 3,
+    baseline_method: str = "als",
+    normalize: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Pipeline de pré-processamento:
+      - despike
+      - suavização Savitzky-Golay
+      - correção de baseline (ALS ou FFT)
+      - normalização (0–1)
+    Retorna (x, y_processado, metadados)
+    """
+    y_proc = y.astype(float).copy()
+    meta: Dict[str, Any] = {}
+
+    # despike
+    if despike_method == "auto_compare":
+        y_proc, best, metrics = compare_despike_algorithms(y_proc)
+        meta["despike_method"] = best
+        meta["despike_metrics"] = metrics
+    elif despike_method is not None:
+        y_proc = despike(y_proc, method=despike_method)
+        meta["despike_method"] = despike_method
+
+    # smoothing
+    if smooth:
+        if window_length >= len(y_proc):
+            window_length = len(y_proc) - 1
+        if window_length % 2 == 0:
+            window_length += 1
+        window_length = max(window_length, 3)
+        y_proc = savgol_filter(
+            y_proc, window_length=window_length, polyorder=polyorder
+        )
+        meta["savgol"] = {
+            "window_length": window_length,
+            "polyorder": polyorder,
+        }
+
+    # baseline
+    if baseline_method == "als":
+        base = baseline_als(y_proc)
+    elif baseline_method == "fft":
+        base = baseline_fft_smooth(y_proc)
+    else:
+        base = np.zeros_like(y_proc)
+    y_proc = y_proc - base
+    meta["baseline"] = {"method": baseline_method}
+
+    # normalização
+    if normalize:
+        ymin = float(np.min(y_proc))
+        ymax = float(np.max(y_proc))
+        if ymax > ymin:
+            y_proc = (y_proc - ymin) / (ymax - ymin)
+        meta["normalize"] = True
+
+    return x, y_proc, meta
+
+# ---------------------------------------------------------------------
+# PICOS
+# ---------------------------------------------------------------------
+def detect_peaks(
+    x: np.ndarray,
+    y: np.ndarray,
+    height: float = 0.05,
+    distance: int = 5,
+    prominence: float = 0.02,
+) -> List[Peak]:
+    """
+    Detecta picos no espectro processado.
+    """
+    indices, _ = find_peaks(
+        y, height=height, distance=distance, prominence=prominence
+    )
+    return [Peak(position_cm1=float(x[i]), intensity=float(y[i])) for i in indices]
+
+def map_peaks_to_molecular_groups(peaks: List[Peak]) -> List[Peak]:
+    """
+    Atribui grupos moleculares aos picos com base em MOLECULAR_MAP.
+    """
+    for p in peaks:
+        p.group = None
+        for item in MOLECULAR_MAP:
+            x_min, x_max = item["range"]
+            if x_min <= p.position_cm1 <= x_max:
+                p.group = item["group"]
+                break
+    return peaks
+
+def gaussian(x, amp, cen, wid):
+    return amp * np.exp(-(x - cen) ** 2 / (2 * wid ** 2))
+
+def fit_peak_simple(x, y, center, window=10.0):
+    """
+    Ajuste Gaussiano simples ao redor de um pico (sem lmfit).
+    """
+    mask = (x >= center - window) & (x <= center + window)
+    xi, yi = x[mask], y[mask]
+    if len(xi) < 5:
+        return {}
+    amp0 = float(np.max(yi))
+    cen0 = float(center)
+    wid0 = 2.0
+    try:
+        popt, _ = curve_fit(
+            gaussian, xi, yi, p0=[amp0, cen0, wid0], maxfev=2000
+        )
+        return {
+            "model": "gaussian",
+            "params": {
+                "amp": float(popt[0]),
+                "cen": float(popt[1]),
+                "wid": float(popt[2]),
+            },
+        }
+    except Exception:
+        return {}
+
+def fit_peaks_lmfit_global(
+    x: np.ndarray,
+    y: np.ndarray,
+    peaks: List[Peak],
+    model_type: str = "Voigt",
+) -> List[Peak]:
+    """
+    Ajuste global multi-pico usando lmfit (Voigt/Gauss/Lorentz).
+    """
+    if not LMFIT_AVAILABLE:
+        raise RuntimeError("lmfit não está disponível.")
+    xmin = min(p.position_cm1 for p in peaks) - 20
+    xmax = max(p.position_cm1 for p in peaks) + 20
+    mask = (x >= xmin) & (x <= xmax)
+    x_fit = x[mask]
+    y_fit = y[mask]
+    if len(x_fit) < 5:
+        return peaks
+
+    def make_model(prefix):
+        if model_type.lower() == "gaussian":
+            return GaussianModel(prefix=prefix)
+        elif model_type.lower() == "lorentzian":
+            return LorentzianModel(prefix=prefix)
+        else:
+            return VoigtModel(prefix=prefix)
+
+    model = None    # type: ignore
+    for i, p in enumerate(peaks):
+        m = make_model(f"p{i}_")
+        model = m if model is None else (model + m)
+
+    params = model.make_params()
+    for i, p in enumerate(peaks):
+        pref = f"p{i}_"
+        cen = p.position_cm1
+        amp = max(1e-6, p.intensity * 10.0)
+        sigma0 = 3.0
+        params[f"{pref}center"].set(value=cen, min=cen - 10, max=cen + 10)
+        params[f"{pref}amplitude"].set(value=amp, min=0)
+        if f"{pref}sigma" in params:
+            params[f"{pref}sigma"].set(value=sigma0, min=0.1, max=50)
+        if f"{pref}gamma" in params:
+            params[f"{pref}gamma"].set(value=sigma0, min=0.1, max=50)
+
+    result = model.fit(y_fit, params, x=x_fit)
+
+    for i, p in enumerate(peaks):
+        pref = f"p{i}_"
+        fit_params = {}
+        for name, val in result.params.items():
+            if name.startswith(pref):
+                fit_params[name.replace(pref, "")] = float(val.value)
+        p.fit_params = fit_params
+        if "center" in fit_params:
+            p.position_cm1 = fit_params["center"]
+        if "amplitude" in fit_params:
+            p.intensity = fit_params["amplitude"]
+        if "sigma" in fit_params:
+            p.width = fit_params["sigma"]
+    return peaks
+
+def fit_peaks(x, y, peaks: List[Peak], use_lmfit: bool = True) -> List[Peak]:
+    """
+    Wrapper: usa lmfit se disponível, senão cai no ajuste simples.
+    """
+    if use_lmfit and LMFIT_AVAILABLE and len(peaks) > 0:
+        return fit_peaks_lmfit_global(x, y, peaks, model_type="Voigt")
+    for p in peaks:
+        res = fit_peak_simple(x, y, p.position_cm1, window=8.0)
+        if res:
+            p.fit_params = res["params"]
+            if "cen" in res["params"]:
+                p.position_cm1 = float(res["params"]["cen"])
+            if "amp" in res["params"]:
+                p.intensity = float(res["params"]["amp"])
+            if "wid" in res["params"]:
+                p.width = float(res["params"]["wid"])
+    return peaks
+
+def infer_diseases(peaks: List[Peak]):
+    """
+    Aplica regras simples para sugerir “alterações” com base nos grupos presentes.
+    """
+    groups_present = {p.group for p in peaks if p.group is not None}
+    matches = []
+    for rule in DISEASE_RULES:
+        required = set(rule["groups_required"])
+        score = len(required.intersection(groups_present))
+        if score > 0:
+            matches.append(
+                {
+                    "name": rule["name"],
+                    "score": score,
+                    "description": rule["description"],
+                }
+            )
+    matches.sort(key=lambda m: m["score"], reverse=True)
+    return matches
+
+# ---------------------------------------------------------------------
+# CALIBRAÇÃO
+# ---------------------------------------------------------------------
+def apply_base_wavenumber_correction(
+    x_obs: np.ndarray,
+    base_poly_coeffs: np.ndarray,
+) -> np.ndarray:
+    """
+    Aplica polinômio fixo de calibração (obtido previamente) ao eixo bruto.
+    """
+    base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
+    return np.polyval(base_poly_coeffs, x_obs)
+
+def calibrate_with_fixed_pattern_and_silicon(
+    silicon_file,
+    sample_file,
+    base_poly_coeffs: np.ndarray,
+    silicon_ref_position: float = 520.7,
+    paper_file=None,
+    progress_cb=None,
+) -> Dict[str, Any]:
+    """
+    Calibração com polinômio fixo + Silício.
+    Estratégia robusta para localizar pico de Silício:
+      - aplica polinômio base
+      - tenta janela 480-560 cm-1
+      - se não houver pontos, expande janela (400-700)
+      - se ainda não houver, busca pico mais próximo de silicon_ref_position
+        usando find_peaks sobre espectro suavizado/interpolado
+      - se tudo falhar, define delta = 0 e retorna aviso em 'calibration.warning'
+    Também subtrai papel (paper_file) se fornecido.
+    """
+    def tick(p, text=""):
+        if progress_cb is not None:
+            progress_cb(p, text)
+
+    preprocess_kwargs = {
+        "despike_method": "auto_compare",
+        "smooth": True,
+        "baseline_method": "als",
+        "normalize": False,
+    }
+
+    # 1) SILÍCIO
+    tick(5, "Carregando Silício...")
+    x_si_raw, y_si_raw = load_spectrum(silicon_file)
+
+    # pré-processa Silício (mantemos normalize=False para preservar picos)
+    x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
+
+    tick(20, "Aplicando polinômio base ao Silício...")
+    x_si_base = apply_base_wavenumber_correction(x_si, base_poly_coeffs)
+
+    # tentativa 1: janela 480-560
+    mask_si = (x_si_base >= 480) & (x_si_base <= 560)
+
+    si_cal_base: Optional[float] = None
+    warning: Optional[str] = None
+
+    if np.any(mask_si):
+        idx_max = np.argmax(y_si[mask_si])
+        x_si_region = x_si_base[mask_si]
+        si_cal_base = float(x_si_region[idx_max])
+    else:
+        # tentativa 2: janela expandida 400-700
+        tick(30, "Janela Si vazia — expandindo janela (400–700 cm⁻¹)...")
+        mask_si2 = (x_si_base >= 400) & (x_si_base <= 700)
+        if np.any(mask_si2):
+            idx_max = np.argmax(y_si[mask_si2])
+            x_si_region = x_si_base[mask_si2]
+            si_cal_base = float(x_si_region[idx_max])
+        else:
+            # tentativa 3: buscar picos no espectro de silício (suavizado/interpolado)
+            tick(45, "Buscando picos de Si por detecção automática...")
+            try:
+                x_uniform = np.linspace(
+                    np.min(x_si_base), np.max(x_si_base),
+                    max(800, len(x_si_base))
+                )
+                y_uniform = np.interp(x_uniform, x_si_base, y_si)
+
+                # suaviza levemente para reduzir ruído
+                lw = 11 if len(y_uniform) > 11 else (len(y_uniform) // 2) * 2 + 1
+                if lw >= 5:
+                    y_smooth = savgol_filter(y_uniform, lw, polyorder=3)
+                else:
+                    y_smooth = y_uniform
+
+                peaks_idx, props = find_peaks(
+                    y_smooth,
+                    height=np.max(y_smooth) * 0.1,
+                    distance=5,
+                    prominence=0.02,
+                )
+                if len(peaks_idx) > 0:
+                    distances = np.abs(x_uniform[peaks_idx] - silicon_ref_position)
+                    sel = peaks_idx[np.argmin(distances)]
+                    si_cal_base = float(x_uniform[sel])
+                else:
+                    warning = "Não foi possível localizar pico de Silício automaticamente (nenhum pico detectado)."
+            except Exception:
+                warning = "Erro ao tentar detectar pico de Silício automaticamente."
+
+    # se ainda não achou, devolve delta = 0 (sem ajuste fino)
+    if si_cal_base is None:
+        tick(60, "Não encontrado pico Si: usando delta = 0 e prosseguindo (ver warning).")
+        delta = 0.0
+        warning = warning or "Pico de Silício não encontrado; calibração fina por Si não aplicada."
+    else:
+        delta = float(silicon_ref_position) - float(si_cal_base)
+
+    def corrector_final(x_arr: np.ndarray) -> np.ndarray:
+        x_base = apply_base_wavenumber_correction(x_arr, base_poly_coeffs)
+        return x_base + delta
+
+    # 2) AMOSTRA (+ PAPEL OPCIONAL)
+    tick(65, "Carregando amostra...")
+    x_s_raw, y_s_raw = load_spectrum(sample_file)
+
+    if paper_file is not None:
+        tick(70, "Carregando papel (background) e subtraindo...")
+        x_p_raw, y_p_raw = load_spectrum(paper_file)
+        try:
+            y_p_interp = np.interp(x_s_raw, x_p_raw, y_p_raw)
+            y_s_raw = y_s_raw - y_p_interp
+        except Exception:
+            warning = (warning or "") + " Falha ao subtrair papel (interp)."
+
+    # pré-processa amostra
+    tick(80, "Pré-processando amostra (despike / baseline / smooth)...")
+    x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
+
+    # aplica correção final ao eixo
+    tick(90, "Aplicando correção final ao eixo da amostra...")
+    x_s_cal = corrector_final(x_s)
+
+    tick(100, "Calibração concluída.")
+    calibration_info: Dict[str, Any] = {
+        "base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(),
+        "si_cal_base": float(si_cal_base) if si_cal_base is not None else None,
+        "silicon_ref_position": float(silicon_ref_position),
+        "laser_zero_delta": float(delta),
+    }
+    if warning:
+        calibration_info["warning"] = str(warning)
+
+    return {
+        "x_sample_raw": x_s_raw,
+        "y_sample_raw": y_s_raw,
+        "x_sample_proc": x_s,
+        "y_sample_proc": y_s,
+        "x_sample_calibrated": x_s_cal,
+        "meta_sample": meta_s,
+        "calibration": calibration_info,
+    }
+
+# ---------------------------------------------------------------------
+# EXPORT HDF5
+# ---------------------------------------------------------------------
+def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) -> bytes:
+    """
+    Exporta espectro em um HDF5 simples no estilo NeXus.
+    """
+    if not H5PY_AVAILABLE:
+        raise RuntimeError("h5py não instalado.")
+    bio = io.BytesIO()
+    with h5py.File(bio, "w") as f:
+        nxentry = f.create_group("entry")
+        nxentry.attrs["NX_class"] = "NXentry"
+        nxdata = nxentry.create_group("data")
+        nxdata.attrs["NX_class"] = "NXdata"
+        nxdata.create_dataset("wavenumber", data=x)
+        nxdata.create_dataset("intensity", data=y)
+        meta_grp = nxentry.create_group("metadata")
+        for k, v in metadata.items():
+            meta_grp.attrs[str(k)] = str(v)
+    bio.seek(0)
+    return bio.read()
