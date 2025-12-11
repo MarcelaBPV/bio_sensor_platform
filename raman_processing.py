@@ -24,29 +24,77 @@ from scipy.sparse.linalg import spsolve
 # Configs / mapas (edite conforme necessário)
 # -------------------------
 MOLECULAR_MAP: List[Dict[str, Any]] = [
-    # Aromáticos / aminoácidos
+
+    # =========================================
+    # 1) AROMÁTICOS / AMINOÁCIDOS
+    # =========================================
     {"range": (995, 1007), "group": "Fenilalanina (~1001 cm⁻¹)"},
-    # Substrato / enlaces C-O / C-C
-    {"range": (1088, 1098), "group": "C–O / C–C (~1093 cm⁻¹)"},
-    # Enlaces C-N / cadeias laterais
+    {"range": (1000, 1008), "group": "Fenilalanina (~1003 cm⁻¹)"},
+
+    # =========================================
+    # 2) NUCLEOTÍDEOS / DNA / RNA
+    # =========================================
+    {"range": (780, 795), "group": "DNA/RNA fosfodiéster (~786 cm⁻¹)"},
+    {"range": (1078, 1092), "group": "PO₂⁻ simétrico / DNA (~1085 cm⁻¹)"},
+
+    # =========================================
+    # 3) PROTEÍNAS / PEPTÍDEOS
+    # =========================================
     {"range": (1118, 1126), "group": "C–N (~1122 cm⁻¹)"},
-    # Amida III (proteínas)
-    {"range": (1240, 1254), "group": "Amida III (~1247 cm⁻¹)"},
-    # CH2/CH3 (lipídios / cadeias alifáticas) - região ~1336 cm⁻¹
+    {"range": (1235, 1255), "group": "Amida III (~1247 cm⁻¹)"},
+    {"range": (1510, 1545), "group": "Amida II (~1530–1540 cm⁻¹)"},
+    {"range": (1650, 1675), "group": "Amida I (C=O) (~1655 cm⁻¹)"},
+
+    # =========================================
+    # 4) LIPÍDIOS / MEMBRANA CELULAR
+    # =========================================
+    {"range": (1300, 1315), "group": "CH₂ twist (~1305 cm⁻¹)"},
     {"range": (1328, 1344), "group": "CH₂/CH₃ (~1336 cm⁻¹)"},
-    # Estiramento CH3 / bandas associadas (~1380 cm⁻¹)
-    {"range": (1374, 1386), "group": "CH₃ (estiramento) (~1380 cm⁻¹)"},
-    # Outra banda CH2/CH3 / deformação (~1452 cm⁻¹)
-    {"range": (1446, 1458), "group": "CH₂/CH₃ (~1452 cm⁻¹)"},
-    # Hemoglobina / sinais heme
-    {"range": (1560, 1576), "group": "Hemoglobina (~1568 cm⁻¹)"},
-    # Porfirina / Amida I (vibrações de proteína, porfirinas) 1597–1624
+    {"range": (1374, 1386), "group": "CH₃ stretch (~1380 cm⁻¹)"},
+    {"range": (1440, 1470), "group": "CH₂/CH₃ deform. (~1450 cm⁻¹)"},
+    {"range": (1730, 1745), "group": "C=O ester (lipídios oxid.) (~1738 cm⁻¹)"},
+
+    # =========================================
+    # 5) HEMOGLOBINA / PORFIRINAS
+    # =========================================
+    {"range": (700, 740),  "group": "Porfirinas (banda baixa)"},
+    {"range": (1355, 1375), "group": "Heme ν₄ (~1365 cm⁻¹)"},
+    {"range": (1540, 1580), "group": "Hemoglobina (~1568 cm⁻¹)"},
     {"range": (1590, 1628), "group": "Porfirina / Amida I (~1597–1624 cm⁻¹)"},
-    # Mantém faixas gerais já úteis (ex.: lipídios amida, etc.)
-    {"range": (700, 740), "group": "Hemoglobina / porfirinas (banda baixa)"},
-    {"range": (1440, 1470), "group": "Lipídios / CH2 deformação (região ampla)"},
-    {"range": (1650, 1670), "group": "Amidas / proteínas (Amida I C=O)"},
+    {"range": (1620, 1640), "group": "Heme ν₁₀ (~1630 cm⁻¹)"},
+
+    # =========================================
+    # 6) CAROTENOIDES
+    # =========================================
+    {"range": (1145, 1165), "group": "Carotenoide ν₂ (~1156 cm⁻¹)"},
+    {"range": (1505, 1525), "group": "Carotenoide ν₁ (~1515 cm⁻¹)"},
+
+    # =========================================
+    # 7) SUBSTRATO — PAPEL (celulose)
+    # =========================================
+    {"range": (380, 410), "group": "Celulose (~395 cm⁻¹)"},
+    {"range": (520, 535), "group": "Celulose (~525 cm⁻¹)"},
+    {"range": (890, 910), "group": "Celulose (~900 cm⁻¹)"},
+    {"range": (1080, 1100), "group": "Celulose (~1095 cm⁻¹)"},
+    {"range": (1110, 1130), "group": "Celulose (~1120 cm⁻¹)"},
+    {"range": (1365, 1385), "group": "Celulose (~1375 cm⁻¹)"},
+    {"range": (1415, 1435), "group": "Celulose (~1425 cm⁻¹)"},
+
+    # =========================================
+    # 8) SUBSTRATO — PAPEL + PRATA (Ag)
+    # =========================================
+    {"range": (228, 260), "group": "Ag–S ligação (~240 cm⁻¹)"},
+    {"range": (1090, 1100), "group": "Realce SERS Ag sobre celulose (~1095 cm⁻¹)"},
+    {"range": (1350, 1380), "group": "Realce SERS Ag – região de celulose (~1370 cm⁻¹)"},
+
+    # =========================================
+    # 9) SUBSTRATO — PAPEL + OURO (Au)
+    # =========================================
+    {"range": (230, 250), "group": "Au–S ligação (~240 cm⁻¹)"},
+    {"range": (1085, 1100), "group": "Aumento Raman Au sobre celulose (~1090 cm⁻¹)"},
+    {"range": (1340, 1390), "group": "Realce Au – região celulose (~1370 cm⁻¹)"},
 ]
+
 
 DISEASE_RULES: List[Dict[str, Any]] = [
     {
