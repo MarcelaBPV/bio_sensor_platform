@@ -10,6 +10,7 @@ Aba 2: Raman & Correlação (pipeline tipo Figura 1: despike, baseline,
 from typing import List, Tuple, Dict, Optional, Any
 import json
 import io
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -41,13 +42,18 @@ except Exception as e:
 # FUNÇÕES ABA 1 (PACIENTES)
 # ---------------------------------------------------------------------
 def load_patient_table(file) -> pd.DataFrame:
-    name = file.name.lower()
+    name = getattr(file, "name", "").lower()
     if name.endswith(".csv"):
         df = pd.read_csv(file)
     elif name.endswith((".xls", ".xlsx")):
         df = pd.read_excel(file)
     else:
-        df = pd.read_csv(file)
+        # tenta leitura genérica separada por whitespace
+        try:
+            df = pd.read_csv(file)
+        except Exception:
+            file.seek(0)
+            df = pd.read_csv(file, sep=r"\s+", engine="python", header=None)
     return df
 
 def guess_gender_column(df: pd.DataFrame) -> Optional[str]:
@@ -268,6 +274,88 @@ def plot_pipeline_panels(
     return fig
 
 # ---------------------------------------------------------------------
+# FUNÇÃO: GRÁFICO FINAL MULTI-PIKO (estilo figura exemplo)
+# ---------------------------------------------------------------------
+def plot_final_multipeak_fit(
+    x_cal: np.ndarray,
+    y_proc: np.ndarray,
+    peaks: List[rp.Peak],
+    title: str = "Ajuste multi-pico – região 1000–1700 cm⁻¹",
+):
+    # seleção de região (fingerprint)
+    mask = (x_cal >= 990) & (x_cal <= 1700)
+    if np.sum(mask) < 5:
+        # se não houver pontos nesta região usa todo eixo
+        x_reg = x_cal
+        y_reg = y_proc
+    else:
+        x_reg = x_cal[mask]
+        y_reg = y_proc[mask]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # espectro processado (cinza)
+    ax.plot(x_reg, y_reg, color="0.45", lw=1.2, label="Espectro processado")
+
+    # soma dos componentes
+    y_fit_tot = np.zeros_like(x_reg)
+
+    # cores para componentes
+    colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(peaks))))
+
+    for i, p in enumerate(peaks):
+        if not p.fit_params:
+            continue
+
+        # extrai parâmetros de forma robusta
+        if "cen" in p.fit_params:
+            cen = p.fit_params.get("cen", p.position_cm1)
+            amp = p.fit_params.get("amp", p.intensity)
+            wid = p.fit_params.get("wid", p.width or 3.0)
+        else:
+            cen = p.fit_params.get("center", p.position_cm1)
+            amp = p.fit_params.get("amplitude", p.intensity)
+            wid = p.fit_params.get("sigma", p.width or 3.0)
+
+        # componente gaussiana para visualização
+        y_comp = rp.gaussian(x_reg, amp, cen, wid)
+        y_fit_tot += y_comp
+
+        ax.plot(x_reg, y_comp, linestyle="--", linewidth=1.0, alpha=0.9, color=colors[i % len(colors)])
+
+    # soma ajustada (vermelho grosso)
+    ax.plot(x_reg, y_fit_tot, color="red", lw=2.0, label="Soma dos ajustes")
+
+    # marcar picos com 'x' azul
+    px = [p.position_cm1 for p in peaks]
+    if len(px) > 0:
+        py = np.interp(px, x_cal, y_proc)
+        ax.plot(px, py, "bx", ms=7, mew=1.7, label="Picos")
+
+    # anotações (usa group se disponível)
+    for idx, p in enumerate(peaks):
+        if not p.group:
+            continue
+        y_peak = float(np.interp(p.position_cm1, x_cal, y_proc))
+        dy = 0.02 + 0.02 * (idx % 3)
+        ax.annotate(
+            f"{p.group}\n(~{p.position_cm1:.0f} cm⁻¹)",
+            xy=(p.position_cm1, y_peak),
+            xytext=(p.position_cm1 + 12, y_peak + dy),
+            arrowprops=dict(arrowstyle="->", color="red", lw=0.8),
+            fontsize=8,
+            color="red",
+        )
+
+    ax.set_xlabel("Wave(cm⁻¹)")
+    ax.set_ylabel("Int. Norm.")
+    ax.set_title(title)
+    ax.legend(fontsize=8, loc="upper left")
+    ax.grid(alpha=0.2)
+    plt.tight_layout()
+    return fig
+
+# ---------------------------------------------------------------------
 # INTERFACE – ABAS
 # ---------------------------------------------------------------------
 st.title("Plataforma Bio-Raman")
@@ -325,9 +413,7 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["sexo"])
                 with c2:
-                    fig_sexo_bar = plot_percentage_bar(
-                        stats["sexo"]["percentual"], "Sexo/gênero – barras"
-                    )
+                    fig_sexo_bar = plot_percentage_bar(stats["sexo"]["percentual"], "Sexo/gênero – barras")
                     st.pyplot(fig_sexo_bar)
 
             if "fumante" in stats:
@@ -336,9 +422,7 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["fumante"])
                 with c2:
-                    fig_fum_bar = plot_percentage_bar(
-                        stats["fumante"]["percentual"], "Fumante – barras"
-                    )
+                    fig_fum_bar = plot_percentage_bar(stats["fumante"]["percentual"], "Fumante – barras")
                     st.pyplot(fig_fum_bar)
 
             if "doenca" in stats:
@@ -347,14 +431,10 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(stats["doenca"])
                 with c2:
-                    fig_doenc_bar = plot_percentage_bar(
-                        stats["doenca"]["percentual"], "Doença declarada – barras"
-                    )
+                    fig_doenc_bar = plot_percentage_bar(stats["doenca"]["percentual"], "Doença declarada – barras")
                     st.pyplot(fig_doenc_bar)
 
-            assoc_tab = compute_association_gender_smoker_disease(
-                df_pac, col_gender, col_smoker, col_disease
-            )
+            assoc_tab = compute_association_gender_smoker_disease(df_pac, col_gender, col_smoker, col_disease)
             st.markdown("### Associação entre sexo, tabagismo e presença de doença")
             if assoc_tab is not None:
                 st.caption(
@@ -365,19 +445,12 @@ with tab_pacientes:
                 with c1:
                     st.dataframe(assoc_tab)
                 with c2:
-                    fig_assoc = plot_association_bar(
-                        assoc_tab, "Pacientes com doença – % por sexo × fumante"
-                    )
+                    fig_assoc = plot_association_bar(assoc_tab, "Pacientes com doença – % por sexo × fumante")
                     st.pyplot(fig_assoc)
             else:
-                st.info(
-                    "Não foi possível calcular a associação (faltam colunas mapeadas "
-                    "ou não há pacientes com doença = 'Sim')."
-                )
+                st.info("Não foi possível calcular a associação (faltam colunas mapeadas ou não há pacientes com doença = 'Sim').")
 
-            st.caption(
-                "Obs.: 'Não informado' inclui valores vazios, nulos ou não reconhecidos."
-            )
+            st.caption("Obs.: 'Não informado' inclui valores vazios, nulos ou não reconhecidos.")
 
 # ======================= ABA 2 – RAMAN ===============================
 with tab_raman:
@@ -386,30 +459,15 @@ with tab_raman:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Arquivos de espectros")
-        sample_file = st.file_uploader(
-            "Amostra (sangue em papel, etc.)", type=["txt", "csv", "xlsx"]
-        )
-        paper_file = st.file_uploader(
-            "Papel / substrato (background)", type=["txt", "csv", "xlsx"]
-        )
-        si_file = st.file_uploader(
-            "Silício (padrão para ajuste fino)", type=["txt", "csv", "xlsx"]
-        )
+        sample_file = st.file_uploader("Amostra (sangue em papel, etc.)", type=["txt", "csv", "xlsx"])
+        paper_file = st.file_uploader("Papel / substrato (background)", type=["txt", "csv", "xlsx"])
+        si_file = st.file_uploader("Silício (padrão para ajuste fino)", type=["txt", "csv", "xlsx"])
 
     with col2:
         st.subheader("Configurações do processamento")
-        use_lmfit = st.checkbox(
-            "Usar lmfit (ajuste multi-peak Voigt)", value=rp.LMFIT_AVAILABLE
-        )
-        silicon_ref_value = st.number_input(
-            "Posição de referência do pico do Silício (cm⁻¹)",
-            value=520.7,
-            format="%.2f",
-        )
-        coeffs_str = st.text_input(
-            "Coeficientes do polinômio base (np.polyfit, separados por vírgula)",
-            help="Ex.: 1.2e-7, -0.03, 550.0",
-        )
+        use_lmfit = st.checkbox("Usar lmfit (ajuste multi-peak Voigt)", value=rp.LMFIT_AVAILABLE)
+        silicon_ref_value = st.number_input("Posição de referência do pico do Silício (cm⁻¹)", value=520.7, format="%.2f")
+        coeffs_str = st.text_input("Coeficientes do polinômio base (np.polyfit, separados por vírgula)", help="Ex.: 1.2e-7, -0.03, 550.0")
 
     st.markdown("---")
     col_btn1, col_btn2 = st.columns(2)
@@ -436,20 +494,24 @@ with tab_raman:
                 st.stop()
 
             progress = st.progress(0, text="Iniciando pipeline...")
-
             def set_progress(p, text=""):
                 progress.progress(int(p), text=text)
 
             with st.spinner("Processando espectros..."):
                 try:
-                    res = rp.calibrate_with_fixed_pattern_and_silicon(
+                    # chamando de forma robusta: tenta passar paper_file se função aceitar
+                    cal_fn = rp.calibrate_with_fixed_pattern_and_silicon
+                    sig = inspect.signature(cal_fn)
+                    kwargs = dict(
                         silicon_file=si_file,
                         sample_file=sample_file,
                         base_poly_coeffs=base_poly_coeffs,
                         silicon_ref_position=float(silicon_ref_value),
-                        paper_file=paper_file,
                         progress_cb=set_progress,
                     )
+                    if "paper_file" in sig.parameters:
+                        kwargs["paper_file"] = paper_file
+                    res = cal_fn(**kwargs)
                 except Exception as e:
                     progress.empty()
                     st.error(f"Erro no pipeline Raman: {e}")
@@ -496,14 +558,18 @@ with tab_raman:
                             "intensity": p.intensity,
                             "width": p.width or "",
                             "group": p.group,
-                            "fit_params": json.dumps(p.fit_params)
-                            if p.fit_params
-                            else "",
+                            "fit_params": json.dumps(p.fit_params) if p.fit_params else "",
                         }
                         for p in peaks
                     ]
                 )
                 st.dataframe(df_peaks)
+
+                # GRÁFICO FINAL MULTI-PIKO
+                st.subheader("Ajuste multi-pico (região 1000–1700 cm⁻¹)")
+                fig_final = plot_final_multipeak_fit(x_cal, y_proc, peaks)
+                st.pyplot(fig_final)
+
             else:
                 st.info("Nenhum pico detectado com os parâmetros atuais.")
 
@@ -515,15 +581,8 @@ with tab_raman:
                 st.write("Nenhum padrão identificado com as regras atuais.")
 
             if rp.H5PY_AVAILABLE:
-                bytes_h5 = rp.save_to_nexus_bytes(
-                    x_cal, y_proc, {"calibration": json.dumps(res["calibration"])}
-                )
-                st.download_button(
-                    "Baixar espectro calibrado (NeXus-like .h5)",
-                    data=bytes_h5,
-                    file_name="sample_calibrated.h5",
-                    mime="application/octet-stream",
-                )
+                bytes_h5 = rp.save_to_nexus_bytes(x_cal, y_proc, {"calibration": json.dumps(res["calibration"])})
+                st.download_button("Baixar espectro calibrado (NeXus-like .h5)", data=bytes_h5, file_name="sample_calibrated.h5", mime="application/octet-stream")
             else:
                 st.info("Instale 'h5py' para habilitar export HDF5: pip install h5py")
 
@@ -533,7 +592,13 @@ with tab_raman:
             st.error("Carregue pelo menos o espectro da amostra.")
         else:
             # 1) Ler amostra uma vez
-            x_raw, y_raw = rp.load_spectrum(sample_file)
+            try:
+                x_raw, y_raw = rp.load_spectrum(sample_file)
+            except Exception as e:
+                st.error("Erro ao ler espectro da amostra para figura (a–g).")
+                st.exception(e)
+                st.stop()
+
             x_proc, y_proc, meta = rp.preprocess_spectrum(x_raw, y_raw)
             despike_metrics = meta.get("despike_metrics", {})
             if not despike_metrics:
@@ -558,13 +623,19 @@ with tab_raman:
                         paper_buf = io.BytesIO(paper_file.getvalue())
                         paper_buf.name = paper_file.name
 
-                    res_tmp = rp.calibrate_with_fixed_pattern_and_silicon(
+                    # tenta chamar calibracao com ou sem paper_file dependendo da assinatura
+                    cal_fn = rp.calibrate_with_fixed_pattern_and_silicon
+                    sig = inspect.signature(cal_fn)
+                    kwargs = dict(
                         silicon_file=si_buf,
                         sample_file=sample_buf,
                         base_poly_coeffs=base_poly_coeffs,
                         silicon_ref_position=float(silicon_ref_value),
-                        paper_file=paper_buf,
                     )
+                    if "paper_file" in sig.parameters:
+                        kwargs["paper_file"] = paper_buf
+
+                    res_tmp = cal_fn(**kwargs)
                     x_cal = res_tmp["x_sample_calibrated"]
                     y_cal = res_tmp["y_sample_proc"]
                 except Exception as e:
@@ -577,14 +648,9 @@ with tab_raman:
             peaks = rp.detect_peaks(x_cal, y_cal, height=0.05, distance=5, prominence=0.02)
             peaks = rp.fit_peaks(x_cal, y_cal, peaks, use_lmfit=use_lmfit)
 
-            fig_pipeline = plot_pipeline_panels(
-                x_raw, y_raw, x_proc, y_proc, x_cal, y_cal, peaks, despike_metrics
-            )
+            fig_pipeline = plot_pipeline_panels(x_raw, y_raw, x_proc, y_proc, x_cal, y_cal, peaks, despike_metrics)
             st.pyplot(fig_pipeline)
 
 # Rodapé
 st.markdown("---")
-st.caption(
-    "Aba 1: cadastro e estatísticas de pacientes • "
-    "Aba 2: Raman harmonizado + calibração fixa + Si + visualização estilo Figura 1."
-)
+st.caption("Aba 1: cadastro e estatísticas de pacientes • Aba 2: Raman harmonizado + calibração fixa + Si + visualização estilo Figura 1.")
