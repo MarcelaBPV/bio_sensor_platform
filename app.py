@@ -549,6 +549,77 @@ with tab_raman:
             peaks = rp.map_peaks_to_molecular_groups(peaks)
             diseases = rp.infer_diseases(peaks)
 
+               # --- inserção: tabelas detalhadas de picos, grupos e correlação com doenças ---
+# peaks já é uma lista de rp.Peak com .position_cm1, .intensity, .width, .group
+
+# 1) Tabela detalhada de picos
+if peaks:
+    df_peaks = pd.DataFrame([
+        {
+            "position_cm-1": float(p.position_cm1),
+            "intensity": float(p.intensity),
+            "width": float(p.width) if p.width is not None else "",
+            "group": p.group or "Sem classificação",
+        }
+        for p in peaks
+    ])
+else:
+    df_peaks = pd.DataFrame(columns=["position_cm-1", "intensity", "width", "group"])
+
+st.subheader("Tabela: picos detectados (e grupo molecular associado)")
+st.dataframe(df_peaks)
+
+# 2) Agregação por grupo molecular
+# conta picos por grupo e calcula % do total de picos
+total_peaks = max(1, len(peaks))  # evita divisão por zero
+group_counts = df_peaks["group"].value_counts(dropna=False).rename_axis("group").reset_index(name="n_peaks")
+group_counts["pct_of_peaks"] = (group_counts["n_peaks"] / total_peaks * 100).round(1)
+
+# para cada grupo, listar as doenças que usam esse grupo nas regras
+def diseases_for_group(group_name: str) -> List[str]:
+    if not group_name or group_name == "Sem classificação":
+        return []
+    return [rule["name"] for rule in rp.DISEASE_RULES if group_name in rule.get("groups_required", [])]
+
+group_counts["linked_diseases"] = group_counts["group"].apply(diseases_for_group)
+
+st.subheader("Tabela: agregação por grupo molecular")
+st.dataframe(group_counts)
+
+# 3) Tabela de correlação grupo → doença (por regras simples)
+# Para cada doença, calcula quantos dos grupos necessários estão presentes e uma 'score' percentual
+disease_rows = []
+present_groups = set(g for g in df_peaks["group"].unique() if pd.notna(g) and g != "")
+
+for rule in rp.DISEASE_RULES:
+    required = set(rule.get("groups_required", []))
+    present = len(required.intersection(present_groups))
+    total_required = len(required) if len(required) > 0 else 1
+    score_pct = round((present / total_required) * 100, 1)
+    disease_rows.append({
+        "disease": rule["name"],
+        "required_groups": ", ".join(required) if required else "",
+        "n_required_present": present,
+        "n_required_total": total_required,
+        "correlation_%": score_pct,
+        "description": rule.get("description", "")
+    })
+
+df_disease_corr = pd.DataFrame(disease_rows).sort_values("correlation_%", ascending=False)
+
+st.subheader("Tabela: correlação entre grupos detectados e condições (regras)")
+st.caption("Interpretação: % indica quantos dos grupos exigidos pela regra foram detectados no espectro.")
+st.dataframe(df_disease_corr)
+
+# opcional: mostrar apenas regras com >= 1 grupo presente
+st.markdown("**Regras com pelo menos um grupo detectado:**")
+df_disease_some = df_disease_corr[df_disease_corr["n_required_present"] > 0]
+if not df_disease_some.empty:
+    st.table(df_disease_some)
+else:
+    st.write("Nenhuma regra tem grupos detectados no espectro atual.")
+# --- fim da inserção ---
+
             st.subheader("Picos detectados e ajustados (eixo calibrado)")
             if peaks:
                 df_peaks = pd.DataFrame(
