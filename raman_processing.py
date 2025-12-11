@@ -24,13 +24,28 @@ from scipy.sparse.linalg import spsolve
 # Configs / mapas (edite conforme necessário)
 # -------------------------
 MOLECULAR_MAP: List[Dict[str, Any]] = [
-    {"range": (700, 740), "group": "Hemoglobina / porfirinas"},
-    {"range": (995, 1005), "group": "Fenilalanina (anéis aromáticos)"},
-    {"range": (1090, 1100), "group": "C-O / C-C (substrato)"},
-    {"range": (1120, 1130), "group": "C-N / cadeias"},
-    {"range": (1330, 1340), "group": "CH2/CH3 (lipídios)"},
-    {"range": (1440, 1470), "group": "Lipídios / CH2 deformação"},
-    {"range": (1650, 1670), "group": "Amidas / proteínas (C=O)"},
+    # Aromáticos / aminoácidos
+    {"range": (995, 1007), "group": "Fenilalanina (~1001 cm⁻¹)"},
+    # Substrato / enlaces C-O / C-C
+    {"range": (1088, 1098), "group": "C–O / C–C (~1093 cm⁻¹)"},
+    # Enlaces C-N / cadeias laterais
+    {"range": (1118, 1126), "group": "C–N (~1122 cm⁻¹)"},
+    # Amida III (proteínas)
+    {"range": (1240, 1254), "group": "Amida III (~1247 cm⁻¹)"},
+    # CH2/CH3 (lipídios / cadeias alifáticas) - região ~1336 cm⁻¹
+    {"range": (1328, 1344), "group": "CH₂/CH₃ (~1336 cm⁻¹)"},
+    # Estiramento CH3 / bandas associadas (~1380 cm⁻¹)
+    {"range": (1374, 1386), "group": "CH₃ (estiramento) (~1380 cm⁻¹)"},
+    # Outra banda CH2/CH3 / deformação (~1452 cm⁻¹)
+    {"range": (1446, 1458), "group": "CH₂/CH₃ (~1452 cm⁻¹)"},
+    # Hemoglobina / sinais heme
+    {"range": (1560, 1576), "group": "Hemoglobina (~1568 cm⁻¹)"},
+    # Porfirina / Amida I (vibrações de proteína, porfirinas) 1597–1624
+    {"range": (1590, 1628), "group": "Porfirina / Amida I (~1597–1624 cm⁻¹)"},
+    # Mantém faixas gerais já úteis (ex.: lipídios amida, etc.)
+    {"range": (700, 740), "group": "Hemoglobina / porfirinas (banda baixa)"},
+    {"range": (1440, 1470), "group": "Lipídios / CH2 deformação (região ampla)"},
+    {"range": (1650, 1670), "group": "Amidas / proteínas (Amida I C=O)"},
 ]
 
 DISEASE_RULES: List[Dict[str, Any]] = [
