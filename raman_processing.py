@@ -49,10 +49,49 @@ MOLECULAR_MAP: List[Dict[str, Any]] = [
 ]
 
 DISEASE_RULES: List[Dict[str, Any]] = [
-    {"name": "Alteração hemoglobina", "description": "Padrão compatível com alterações em heme / porfirinas.", "groups_required": ["Hemoglobina / porfirinas"]},
-    {"name": "Alteração proteica", "description": "Padrão compatível com alterações em proteínas (amida I).", "groups_required": ["Amidas / proteínas (C=O)"]},
-    {"name": "Alteração lipídica", "description": "Padrão compatível com alterações em lipídios de membrana.", "groups_required": ["Lipídios / CH2 deformação", "CH2/CH3 (lipídios)"]},
+    {
+        "name": "Alteração hemoglobina",
+        "description": "Padrão compatível com alterações estruturais ou oxidativas em heme e porfirinas.",
+        "groups_required": ["Hemoglobina (~1568 cm⁻¹)", "Porfirina / Amida I (~1597–1624 cm⁻¹)"],
+    },
+
+    {
+        "name": "Alteração proteica",
+        "description": "Sinais associados a mudanças conformacionais em proteínas (Amida I / III), podendo refletir inflamação ou desnaturação.",
+        "groups_required": ["Amida III (~1247 cm⁻¹)", "Amida I (C=O) (~1655 cm⁻¹)"],
+    },
+
+    {
+        "name": "Alteração lipídica",
+        "description": "Padrão compatível com mudanças em lipídios de membrana, inflamação, danos celulares ou desbalanço metabólico.",
+        "groups_required": ["CH₂/CH₃ (~1336 cm⁻¹)", "CH₂/CH₃ (~1452 cm⁻¹)"],
+    },
+
+    {
+        "name": "Estresse oxidativo",
+        "description": "Associação clássica entre alterações em Fenilalanina e sinais fortes de heme, ligados à inflamação e produção de espécies reativas.",
+        "groups_required": ["Fenilalanina (~1001 cm⁻¹)", "Hemoglobina (~1568 cm⁻¹)"],
+    },
+
+    {
+        "name": "Dano de membrana",
+        "description": "Associação entre CH₃ (~1380 cm⁻¹) e CH₂/CH₃ indica disrupção lipídica e possível apoptose ou necrose.",
+        "groups_required": ["CH₃ (~1380 cm⁻¹)", "CH₂/CH₃ (~1452 cm⁻¹)"],
+    },
+
+    {
+        "name": "Desbalanço aromático",
+        "description": "Variação em aminoácidos aromáticos (Fenilalanina) associada a alterações metabólicas ou inflamação de baixo grau.",
+        "groups_required": ["Fenilalanina (~1001 cm⁻¹)"],
+    },
+
+    {
+        "name": "Alteração estrutural proteica",
+        "description": "Mudanças simultâneas em Amida III e bandas C–N sugerem alterações secundárias ou desnaturação.",
+        "groups_required": ["Amida III (~1247 cm⁻¹)", "C–N (~1122 cm⁻¹)"],
+    },
 ]
+
 
 # -------------------------
 # Data classes
