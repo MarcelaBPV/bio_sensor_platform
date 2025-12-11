@@ -217,30 +217,35 @@ def baseline_als(
     niter: int = 10,
 ) -> np.ndarray:
     """
-    Baseline ALS usando matriz esparsa para maior eficiência.
-    Retorna o baseline z do mesmo tamanho que y.
-    """
-    y = np.asarray(y, dtype=float)
-    L = y.size
-    if L < 3:
-        return np.zeros_like(y)
+    Cálculo de baseline usando o método Asymmetric Least Squares (ALS)
+    de Eilers e Boelens.
 
-    # matriz D (segunda diferença) em formato esparso
-    # shape (L-2, L)
-    D = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(L - 2, L))
+    Garante que as matrizes W e H tenham shape (L x L),
+    evitando erros de broadcasting.
+    """
+    # Garante array 1D numpy
+    y = np.asarray(y, dtype=float).ravel()
+    L = y.size
+
+    # D: matriz de segunda derivada discreta (shape: (L-2, L))
+    D = np.diff(np.eye(L), 2)
+    # H: matriz de suavização (shape: (L, L))
+    H = lam * D.T.dot(D)
+
+    # Pesos iniciais
     w = np.ones(L, dtype=float)
 
-    for _ in range(max(1, int(niter))):
-        # construir W e Z = W + lam * D^T D
-        W = sparse.spdiags(w, 0, L, L)
-        Z = W + lam * (D.T @ D)
-        # spsolve espera CSC/CSR — spsolve cuidará internamente, mas converte quando necessário
-        z = spsolve(Z.tocsc(), w * y)
-        # atualizar pesos
-        w = p * (y > z) + (1.0 - p) * (y < z)
+    for _ in range(niter):
+        # W: matriz diagonal de pesos (L x L)
+        W = np.diag(w)
+        # Z tem shape (L x L)
+        Z = W + H
+        # Resolve (W + H) z = W y
+        z = np.linalg.solve(Z, w * y)
+        # Atualiza pesos (assimetria)
+        w = p * (y > z) + (1 - p) * (y < z)
 
     return z
-
 
 def baseline_fft_smooth(y: np.ndarray, cutoff_fraction: float = 0.02) -> np.ndarray:
     """
