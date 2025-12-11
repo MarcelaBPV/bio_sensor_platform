@@ -1,325 +1,150 @@
-# raman_processing.py
+# app.py
 # -*- coding: utf-8 -*-
 """
-Módulo de processamento Raman:
-- load_spectrum
-- despike_median
-- baseline_als (esparsa, robusta)
-- preprocess_spectrum
-- detect_peaks, map_peaks_to_molecular_groups, infer_diseases
-- calibrate_with_fixed_pattern_and_silicon (requere silicon, sample, blank)
-- process_raman_spectrum_with_groups (fluxo alto-nível)
+Streamlit front-end que usa raman_processing.py
 """
 
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional, Any
-
-import numpy as np
+import streamlit as st
 import pandas as pd
-from scipy.signal import find_peaks, savgol_filter, medfilt
-from scipy.sparse import diags, csc_matrix, identity
-from scipy.sparse.linalg import spsolve
+import matplotlib.pyplot as plt
+from typing import Optional
+import numpy as np
 
-# -------------------------
-# Configs / mapas (edite conforme necessário)
-# -------------------------
-MOLECULAR_MAP: List[Dict[str, Any]] = [
-    {"range": (700, 740), "group": "Hemoglobina / porfirinas"},
-    {"range": (995, 1005), "group": "Fenilalanina (anéis aromáticos)"},
-    {"range": (1090, 1100), "group": "C-O / C-C (substrato)"},
-    {"range": (1120, 1130), "group": "C-N / cadeias"},
-    {"range": (1330, 1340), "group": "CH2/CH3 (lipídios)"},
-    {"range": (1440, 1470), "group": "Lipídios / CH2 deformação"},
-    {"range": (1650, 1670), "group": "Amidas / proteínas (C=O)"},
-]
+import raman_processing as rp
 
-DISEASE_RULES: List[Dict[str, Any]] = [
-    {"name": "Alteração hemoglobina", "description": "Padrão compatível com alterações em heme / porfirinas.", "groups_required": ["Hemoglobina / porfirinas"]},
-    {"name": "Alteração proteica", "description": "Padrão compatível com alterações em proteínas (amida I).", "groups_required": ["Amidas / proteínas (C=O)"]},
-    {"name": "Alteração lipídica", "description": "Padrão compatível com alterações em lipídios de membrana.", "groups_required": ["Lipídios / CH2 deformação", "CH2/CH3 (lipídios)"]},
-]
+st.set_page_config(page_title="BioRaman", layout="wide")
+st.title("🧬 BioRaman — Preprocess & Peak Mapping")
 
-# -------------------------
-# Data classes
-# -------------------------
-@dataclass
-class Peak:
-    position_cm1: float
-    intensity: float
-    group: Optional[str] = None
+with st.sidebar:
+    st.header("Modo de operação")
+    mode = st.radio("Escolha:", ["Processar 1 arquivo", "Calibração (3 arquivos: Si+amostra+blank)"])
+    st.markdown("---")
+    st.subheader("Parâmetros gerais")
+    use_despike = st.checkbox("Remover spikes (mediana)", value=True)
+    smooth = st.checkbox("Suavizar (Savitzky-Golay)", value=True)
+    window_length = st.slider("Janela SG (ímpar)", 5, 101, 9, 2)
+    polyorder = st.slider("Ordem SG", 2, 5, 3)
+    baseline_method = st.selectbox("Linha de base", ["als", "none"], index=0)
+    normalize = st.checkbox("Normalizar 0–1", value=True)
+    st.markdown("---")
+    st.subheader("Detecção de picos")
+    peak_height = st.slider("Altura mínima", 0.0, 1.0, 0.1, 0.01)
+    peak_prominence = st.slider("Proeminência mínima", 0.0, 1.0, 0.05, 0.01)
+    peak_distance = st.slider("Distância mínima entre picos (pontos)", 1, 200, 5)
 
-@dataclass
-class DiseaseMatch:
-    name: str
-    score: int
-    description: str
+if mode == "Processar 1 arquivo":
+    uploaded = st.file_uploader("Faça upload do espectro (.txt/.csv/.xlsx)", type=["txt","csv","xls","xlsx"])
+    if uploaded is None:
+        st.info("Envie um arquivo para processar.")
+        st.stop()
 
-# -------------------------
-# Leitura de espectro
-# -------------------------
-def load_spectrum(file) -> Tuple[np.ndarray, np.ndarray]:
-    """Lê .txt/.csv/.xls/.xlsx - retorna (x, y)."""
-    filename = getattr(file, "name", "").lower()
+    preprocess_kwargs = {"use_despike": use_despike, "smooth": smooth, "window_length": window_length, "polyorder": polyorder, "baseline_method": baseline_method, "normalize": normalize}
     try:
-        if filename.endswith(".txt"):
-            df = pd.read_csv(file, sep=r"\s+", comment="#", engine="python")
-        elif filename.endswith(".csv"):
-            try:
-                df = pd.read_csv(file)
-            except Exception:
-                file.seek(0)
-                df = pd.read_csv(file, sep=";")
-        elif filename.endswith((".xls", ".xlsx")):
-            df = pd.read_excel(file)
+        res = rp.process_raman_spectrum_with_groups(
+            uploaded,
+            preprocess_kwargs=preprocess_kwargs,
+            peak_height=peak_height,
+            peak_distance=peak_distance,
+            peak_prominence=peak_prominence,
+        )
+    except Exception as e:
+        st.error(f"Erro ao processar: {e}")
+        st.stop()
+
+    x_raw, y_raw = res["x_raw"], res["y_raw"]
+    x_proc, y_proc = res["x_proc"], res["y_proc"]
+    peaks, diseases = res["peaks"], res["diseases"]
+
+    col1, col2 = st.columns([2,1])
+    with col1:
+        st.subheader("Espectro")
+        fig, ax = plt.subplots(figsize=(9,4))
+        ax.plot(x_raw, y_raw, label="Bruto", alpha=0.6)
+        ax.plot(x_proc, y_proc, label="Pré-processado", color="black")
+        if peaks:
+            ax.scatter([p.position_cm1 for p in peaks], [p.intensity for p in peaks], color="red", marker="x")
+            for p in peaks:
+                if p.group:
+                    ax.annotate(p.group, xy=(p.position_cm1, p.intensity), xytext=(5,5), fontsize=8)
+        ax.set_xlabel("Raman shift (cm⁻¹)")
+        ax.set_ylabel("Intensidade (u.a.)")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        st.pyplot(fig)
+    with col2:
+        st.subheader("Picos detectados")
+        if not peaks:
+            st.info("Nenhum pico detectado.")
         else:
-            df = pd.read_csv(file, sep=r"\s+", comment="#", engine="python")
-    except Exception:
-        file.seek(0)
-        text = file.read()
-        if isinstance(text, bytes):
-            text = text.decode(errors="ignore")
-        from io import StringIO
-        df = pd.read_csv(StringIO(text), sep=r"\s+", comment="#", engine="python")
+            dfp = pd.DataFrame([{"posição (cm⁻¹)": round(p.position_cm1,2), "intensidade": round(p.intensity,4), "grupo": p.group or "-"} for p in peaks])
+            st.dataframe(dfp, use_container_width=True)
 
-    df = df.dropna(axis=1, how="all")
-    if df.shape[1] < 2:
-        raise ValueError("Não foi possível identificar colunas X e Y no arquivo.")
-
-    numeric_df = df.select_dtypes(include=[np.number])
-    if numeric_df.shape[1] >= 2:
-        x = numeric_df.iloc[:, 0].to_numpy(dtype=float)
-        y = numeric_df.iloc[:, 1].to_numpy(dtype=float)
+    st.markdown("---")
+    st.subheader("Padrões / Doenças (regras simples)")
+    if not diseases:
+        st.info("Nenhum padrão detectado.")
     else:
-        x = df.iloc[:, 0].astype(float).to_numpy()
-        y = df.iloc[:, 1].astype(float).to_numpy()
+        dfd = pd.DataFrame([{"padrão": d.name, "score": d.score, "descricao": d.description} for d in diseases])
+        st.dataframe(dfd, use_container_width=True)
 
-    return x, y
+    # Save results
+    if st.button("Salvar resultados (CSV)"):
+        out_df = pd.DataFrame({"x_raw": x_raw, "y_raw": y_raw, "x_proc": x_proc, "y_proc": y_proc})
+        out_df.to_csv("raman_results.csv", index=False)
+        st.success("Salvo como raman_results.csv")
 
-# -------------------------
-# Despike (mediana + zscore)
-# -------------------------
-def despike_median(y: np.ndarray, kernel_size: int = 5, z_thresh: float = 6.0) -> np.ndarray:
-    y = y.astype(float).copy()
+else:  # calibration mode (3 uploads)
+    st.info("Envie os 3 arquivos: silício (padrão), amostra, blank (porta-amostra)")
+    si_file = st.file_uploader("Padrão de silício", type=["txt","csv","xls","xlsx"], key="si")
+    sample_file = st.file_uploader("Amostra", type=["txt","csv","xls","xlsx"], key="sample")
+    blank_file = st.file_uploader("Blank (porta-amostra)", type=["txt","csv","xls","xlsx"], key="blank")
+
+    st.subheader("Coeficientes do polinômio base (ex.: [a_n,...,a0] para np.polyval)")
+    base_coeffs_text = st.text_area("Coeficientes separados por vírgula", value="0,1")  # default identity
     try:
-        y_med = medfilt(y, kernel_size=kernel_size)
+        base_coeffs = [float(s.strip()) for s in base_coeffs_text.split(",") if s.strip() != ""]
     except Exception:
-        k = min(kernel_size, len(y) if len(y) % 2 == 1 else len(y) - 1)
-        if k < 3:
-            return y
-        y_med = medfilt(y, kernel_size=k)
-    resid = y - y_med
-    sigma = np.std(resid) + 1e-12
-    z = np.abs(resid) / sigma
-    y[z > z_thresh] = y_med[z > z_thresh]
-    return y
+        st.error("Coeficientes inválidos.")
+        st.stop()
 
-# -------------------------
-# Baseline ALS robusta (sparse)
-# -------------------------
-def baseline_als(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
-    y = np.asarray(y, dtype=float).ravel()
-    L = y.size
-    if L < 3:
-        return np.zeros_like(y)
-    # D is (L-2, L) second-difference operator (sparse)
-    D = diags([np.ones(L-2), -2*np.ones(L-2), np.ones(L-2)], [0,1,2], shape=(L-2, L))
-    H = (D.T @ D) * lam  # sparse (L x L)
-    w = np.ones(L, dtype=float)
-    z = np.zeros(L, dtype=float)
-    for _ in range(niter):
-        W = diags(w, 0, shape=(L, L))
-        Z = W + H
+    if st.button("Rodar calibração"):
         try:
-            z = spsolve(Z, w * y)
-        except Exception:
-            Zd = Z.toarray()
-            z = np.linalg.solve(Zd, w * y)
-        w = p * (y > z) + (1 - p) * (y < z)
-    return z
-
-# -------------------------
-# Pré-processamento: despike -> baseline -> savgol -> normalize
-# -------------------------
-def preprocess_spectrum(
-    x: np.ndarray,
-    y: np.ndarray,
-    use_despike: bool = True,
-    smooth: bool = True,
-    window_length: int = 9,
-    polyorder: int = 3,
-    baseline_method: Optional[str] = "als",
-    normalize: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    meta: Dict[str, Any] = {}
-    y_proc = y.astype(float).copy()
-
-    if use_despike and len(y_proc) >= 3:
-        y_proc = despike_median(y_proc, kernel_size=5, z_thresh=6.0)
-        meta['despike'] = 'median'
-
-    base = np.zeros_like(y_proc)
-    if baseline_method == "als":
-        base = baseline_als(y_proc, lam=1e5, p=0.01, niter=10)
-        meta['baseline'] = 'als'
-    elif baseline_method is None:
-        meta['baseline'] = 'none'
-    else:
-        raise ValueError(f"baseline_method desconhecido: {baseline_method}")
-
-    y_proc = y_proc - base
-
-    if smooth and len(y_proc) >= 5:
-        wl = window_length
-        if wl >= len(y_proc):
-            wl = len(y_proc) - 1
-        if wl % 2 == 0:
-            wl += 1
-        wl = max(wl, 3)
-        try:
-            y_proc = savgol_filter(y_proc, window_length=wl, polyorder=polyorder)
-            meta['savgol'] = {'window_length': wl, 'polyorder': polyorder}
+            out = rp.calibrate_with_fixed_pattern_and_silicon(
+                silicon_file=si_file,
+                sample_file=sample_file,
+                blank_file=blank_file,
+                base_poly_coeffs=np.array(base_coeffs, dtype=float),
+                silicon_ref_position=520.7,
+                preprocess_kwargs={"use_despike": use_despike, "smooth": smooth, "window_length": window_length, "polyorder": polyorder, "baseline_method": baseline_method, "normalize": normalize},
+            )
         except Exception as e:
-            meta['savgol_error'] = str(e)
+            st.error(f"Erro na calibração: {e}")
+            st.stop()
 
-    if normalize:
-        ymin = float(np.min(y_proc))
-        ymax = float(np.max(y_proc))
-        if ymax > ymin + 1e-12:
-            y_proc = (y_proc - ymin) / (ymax - ymin)
-            meta['normalize'] = 'minmax'
+        # Show calibrated sample vs blank-corrected
+        fig, ax = plt.subplots(figsize=(9,4))
+        ax.plot(out["x_sample_proc"], out["y_sample_proc"], label="Amostra (pré-processado)")
+        ax.plot(out["x_sample_calibrated"], out["y_sample_blank_corrected"], label="Amostra (calibrada + blank subtraído)", color="black")
+        ax.set_xlabel("Raman shift (cm⁻¹)")
+        ax.set_ylabel("Intensidade (u.a.)")
+        ax.legend()
+        st.pyplot(fig)
+
+        # detect peaks on blank-corrected spectrum
+        peaks = rp.detect_peaks(out["x_sample_calibrated"], out["y_sample_blank_corrected"], height=peak_height, distance=peak_distance, prominence=peak_prominence)
+        peaks = rp.map_peaks_to_molecular_groups(peaks)
+        diseases = rp.infer_diseases(peaks)
+
+        st.subheader("Picos detectados (amostra calibrada)")
+        if not peaks:
+            st.info("Nenhum pico detectado.")
         else:
-            meta['normalize'] = 'none'
+            dfp = pd.DataFrame([{"posição (cm⁻¹)": round(p.position_cm1,2), "intensidade": round(p.intensity,4), "grupo": p.group or "-"} for p in peaks])
+            st.dataframe(dfp, use_container_width=True)
 
-    return x, y_proc, meta
-
-# -------------------------
-# Detect peaks
-# -------------------------
-def detect_peaks(
-    x: np.ndarray,
-    y: np.ndarray,
-    height: float = 0.1,
-    distance: int = 5,
-    prominence: float = 0.02,
-) -> List[Peak]:
-    indices, props = find_peaks(y, height=height, distance=distance, prominence=prominence)
-    peaks = [Peak(position_cm1=float(x[i]), intensity=float(y[i])) for i in indices]
-    return peaks
-
-# -------------------------
-# Map peaks -> molecular groups
-# -------------------------
-def map_peaks_to_molecular_groups(peaks: List[Peak]) -> List[Peak]:
-    for p in peaks:
-        group_found = None
-        for item in MOLECULAR_MAP:
-            lo, hi = item["range"]
-            if lo <= p.position_cm1 <= hi:
-                group_found = item["group"]
-                break
-        p.group = group_found
-    return peaks
-
-# -------------------------
-# Infer diseases (rules)
-# -------------------------
-def infer_diseases(peaks: List[Peak]) -> List[DiseaseMatch]:
-    groups = {p.group for p in peaks if p.group is not None}
-    matches: List[DiseaseMatch] = []
-    for rule in DISEASE_RULES:
-        required = set(rule["groups_required"])
-        score = len(required.intersection(groups))
-        if score > 0:
-            matches.append(DiseaseMatch(name=rule["name"], score=score, description=rule["description"]))
-    matches.sort(key=lambda m: m.score, reverse=True)
-    return matches
-
-# -------------------------
-# High-level processing
-# -------------------------
-def process_raman_spectrum_with_groups(
-    file,
-    preprocess_kwargs: Optional[Dict[str, Any]] = None,
-    peak_height: float = 0.1,
-    peak_distance: int = 5,
-    peak_prominence: float = 0.02,
-) -> Dict[str, Any]:
-    if preprocess_kwargs is None:
-        preprocess_kwargs = {}
-    x_raw, y_raw = load_spectrum(file)
-    x_proc, y_proc, meta = preprocess_spectrum(x_raw, y_raw, **preprocess_kwargs)
-    peaks = detect_peaks(x_proc, y_proc, height=peak_height, distance=peak_distance, prominence=peak_prominence)
-    peaks = map_peaks_to_molecular_groups(peaks)
-    diseases = infer_diseases(peaks)
-    return {
-        "x_raw": x_raw,
-        "y_raw": y_raw,
-        "x_proc": x_proc,
-        "y_proc": y_proc,
-        "peaks": peaks,
-        "diseases": diseases,
-        "meta": meta,
-    }
-
-# -------------------------
-# Calibration workflow requiring 3 uploads
-# -------------------------
-def calibrate_with_fixed_pattern_and_silicon(
-    silicon_file,
-    sample_file,
-    blank_file,
-    base_poly_coeffs: np.ndarray,
-    silicon_ref_position: float = 520.7,
-    preprocess_kwargs: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Workflow que exige os 3 arquivos: silicon, sample, blank."""
-    # validate uploads
-    if silicon_file is None or sample_file is None or blank_file is None:
-        raise ValueError("Forneça os três arquivos: silício, amostra e blank.")
-
-    if preprocess_kwargs is None:
-        preprocess_kwargs = {"use_despike": True, "smooth": True, "window_length": 9, "polyorder": 3, "baseline_method": "als", "normalize": False}
-
-    # silicon
-    x_si_raw, y_si_raw = load_spectrum(silicon_file)
-    x_si, y_si, meta_si = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
-    # apply base poly (assumes base_poly_coeffs is np.poly coefficients for polyval)
-    x_si_base = np.polyval(np.asarray(base_poly_coeffs, dtype=float), x_si)
-    mask_si = (x_si_base >= 480) & (x_si_base <= 560)
-    if not np.any(mask_si):
-        raise RuntimeError("Janela de Si (480-560 cm^-1) vazia.")
-    idx_rel_max = int(np.argmax(y_si[mask_si]))
-    si_cal_base = float(x_si_base[mask_si][idx_rel_max])
-    delta = silicon_ref_position - si_cal_base
-    def corrector_final(x_obs: np.ndarray) -> np.ndarray:
-        return np.polyval(np.asarray(base_poly_coeffs, dtype=float), x_obs) + delta
-    x_si_cal = corrector_final(x_si)
-
-    # sample
-    x_s_raw, y_s_raw = load_spectrum(sample_file)
-    x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
-    x_s_cal = corrector_final(x_s)
-
-    # blank
-    x_b_raw, y_b_raw = load_spectrum(blank_file)
-    x_b, y_b, meta_b = preprocess_spectrum(x_b_raw, y_b_raw, **preprocess_kwargs)
-    x_b_cal = corrector_final(x_b)
-
-    # blank subtraction (interp)
-    y_b_interp = np.interp(x_s_cal, x_b_cal, y_b, left=0.0, right=0.0)
-    y_sample_blank_corrected = y_s - y_b_interp
-
-    return {
-        "x_sample_raw": x_s_raw, "y_sample_raw": y_s_raw,
-        "x_sample_proc": x_s, "y_sample_proc": y_s,
-        "x_sample_calibrated": x_s_cal,
-        "x_blank_raw": x_b_raw, "y_blank_raw": y_b_raw,
-        "x_blank_proc": x_b, "y_blank_proc": y_b,
-        "x_blank_calibrated": x_b_cal,
-        "x_silicon_raw": x_si_raw, "y_silicon_raw": y_si_raw,
-        "x_silicon_proc": x_si, "y_silicon_proc": y_si,
-        "x_silicon_calibrated": x_si_cal,
-        "y_sample_blank_corrected": y_sample_blank_corrected,
-        "meta_sample": meta_s, "meta_blank": meta_b, "meta_silicon": meta_si,
-        "calibration": {"base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(), "si_cal_base": si_cal_base, "silicon_ref_position": silicon_ref_position, "laser_zero_delta": delta},
-    }
+        st.subheader("Padrões / Doenças (regras simples)")
+        if not diseases:
+            st.info("Nenhum padrão detectado.")
+        else:
+            dfd = pd.DataFrame([{"padrão": d.name, "score": d.score, "descricao": d.description} for d in diseases])
+            st.dataframe(dfd, use_container_width=True)
