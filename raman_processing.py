@@ -850,6 +850,190 @@ __all__ = [
     "describe_spectrum",
 ]
 # ---------------------------------------------------------
+# APLICA CORREÇÃO POLINOMIAL AO EIXO
+# ---------------------------------------------------------
+
+def apply_base_wavenumber_correction(x_obs: np.ndarray, base_poly_coeffs: np.ndarray) -> np.ndarray:
+    """Aplica polinômio fixo de calibração (obtido previamente)."""
+    base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
+    return np.polyval(base_poly_coeffs, x_obs)
+
+
+# ---------------------------------------------------------
+# CALIBRAÇÃO COM POLINÔMIO + SILÍCIO + PAPEL
+# ---------------------------------------------------------
+
+def calibrate_with_fixed_pattern_and_silicon(
+    silicon_file,
+    sample_file,
+    base_poly_coeffs: np.ndarray,
+    silicon_ref_position: float = 520.7,
+    paper_file=None,
+    progress_cb=None,
+) -> Dict[str, Any]:
+    """
+    Calibração robusta:
+      1. lẽ Si
+      2. aplica polinômio base
+      3. busca pico de Si em janelas sucessivas
+      4. calcula delta = ref - pico_encontrado
+      5. aplica delta ao eixo da amostra
+      6. se paper_file for fornecido → subtrai background
+    """
+
+    def tick(p, text=""):
+        if progress_cb is not None:
+            progress_cb(p, text)
+
+    preprocess_kwargs = dict(
+        despike_method="auto_compare",
+        smooth=True,
+        baseline_method="als",
+        normalize=False,
+    )
+
+    # -----------------------------
+    # 1) LER SILÍCIO
+    # -----------------------------
+    tick(5, "Lendo espectro de Silício…")
+    x_si_raw, y_si_raw = load_spectrum(silicon_file)
+    x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
+
+    # aplicação do polinômio
+    x_si_base = apply_base_wavenumber_correction(x_si, base_poly_coeffs)
+
+    # -----------------------------
+    # 2) DETECTAR PICO DO SILÍCIO
+    # -----------------------------
+    warning = None
+    si_peak_est = None
+
+    # janela principal
+    mask = (x_si_base >= 480) & (x_si_base <= 560)
+    if np.any(mask):
+        region = x_si_base[mask]
+        idx_max = np.argmax(y_si[mask])
+        si_peak_est = float(region[idx_max])
+
+    # janela expandida
+    if si_peak_est is None:
+        mask2 = (x_si_base >= 400) & (x_si_base <= 700)
+        if np.any(mask2):
+            region = x_si_base[mask2]
+            idx_max = np.argmax(y_si[mask2])
+            si_peak_est = float(region[idx_max])
+
+    # detecção automática
+    if si_peak_est is None:
+        try:
+            x_uni = np.linspace(x_si_base.min(), x_si_base.max(), max(800, len(x_si_base)))
+            y_uni = np.interp(x_uni, x_si_base, y_si)
+
+            lw = 11 if len(y_uni) > 11 else (len(y_uni)//2)*2 + 1
+            y_sm = savgol_filter(y_uni, lw, polyorder=3)
+
+            peaks_idx, props = find_peaks(
+                y_sm,
+                height=np.max(y_sm)*0.1,
+                distance=5,
+                prominence=0.02,
+            )
+            if len(peaks_idx) > 0:
+                d = np.abs(x_uni[peaks_idx] - silicon_ref_position)
+                sel = peaks_idx[np.argmin(d)]
+                si_peak_est = float(x_uni[sel])
+            else:
+                warning = "Nenhum pico do Si detectado automaticamente."
+        except Exception:
+            warning = "Erro ao tentar detectar pico de Silício automaticamente."
+
+    # -----------------------------
+    # 3) CALCULAR DELTA
+    # -----------------------------
+
+    if si_peak_est is None:
+        delta = 0.0
+        warning = warning or "Pico de Si não localizado; delta=0 usado."
+    else:
+        delta = float(silicon_ref_position) - float(si_peak_est)
+
+    def corrector(x_arr):
+        xb = apply_base_wavenumber_correction(x_arr, base_poly_coeffs)
+        return xb + delta
+
+    # -----------------------------
+    # 4) LER AMOSTRA (+ papel)
+    # -----------------------------
+    tick(70, "Lendo espectro da amostra…")
+    x_raw, y_raw = load_spectrum(sample_file)
+
+    if paper_file is not None:
+        tick(75, "Subtraindo background do papel…")
+        try:
+            x_p, y_p = load_spectrum(paper_file)
+            y_p_interp = np.interp(x_raw, x_p, y_p)
+            y_raw = y_raw - y_p_interp
+        except Exception:
+            warning = (warning or "") + " Falha ao subtrair papel; ignorado."
+
+    # pré-processar
+    tick(85, "Pré-processando amostra…")
+    x_proc, y_proc, meta = preprocess_spectrum(x_raw, y_raw, **preprocess_kwargs)
+
+    # aplicar correção final
+    tick(95, "Aplicando calibração final…")
+    x_cal = corrector(x_proc)
+
+    tick(100, "Calibração concluída.")
+
+    # empacotar tudo
+    calib_info = dict(
+        base_poly_coeffs=np.asarray(base_poly_coeffs).tolist(),
+        si_peak_est=si_peak_est,
+        silicon_ref=float(silicon_ref_position),
+        delta=float(delta),
+    )
+    if warning:
+        calib_info["warning"] = warning
+
+    return dict(
+        x_sample_raw=x_raw,
+        y_sample_raw=y_raw,
+        x_sample_proc=x_proc,
+        y_sample_proc=y_proc,
+        x_sample_calibrated=x_cal,
+        meta_sample=meta,
+        calibration=calib_info,
+    )
+# ---------------------------------------------------------
+# EXPORTAÇÃO HDF5 (NeXus-like)
+# ---------------------------------------------------------
+
+def save_to_nexus_bytes(x: np.ndarray, y: np.ndarray, metadata: Dict[str, Any]) -> bytes:
+    """
+    Exporta espectro para um arquivo HDF5 simples no formato NeXus.
+    """
+    if not H5PY_AVAILABLE:
+        raise RuntimeError("h5py não está instalado no ambiente.")
+
+    buf = io.BytesIO()
+    with h5py.File(buf, "w") as f:
+        entry = f.create_group("entry")
+        entry.attrs["NX_class"] = "NXentry"
+
+        data = entry.create_group("data")
+        data.attrs["NX_class"] = "NXdata"
+
+        data.create_dataset("wavenumber", data=x)
+        data.create_dataset("intensity", data=y)
+
+        meta_grp = entry.create_group("metadata")
+        for k, v in metadata.items():
+            meta_grp.attrs[str(k)] = str(v)
+
+    buf.seek(0)
+    return buf.read()
+# ---------------------------------------------------------
 # EXPORTAÇÃO DOS SÍMBOLOS (PARA IMPORTAÇÃO CONTROLADA)
 # ---------------------------------------------------------
 
