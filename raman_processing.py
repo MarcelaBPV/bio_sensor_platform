@@ -110,8 +110,12 @@ def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
         x = numeric_df.iloc[:, 0].to_numpy(dtype=float)
         y = numeric_df.iloc[:, 1].to_numpy(dtype=float)
     else:
-        x = df.iloc[:, 0].astype(float).to_numpy()
-        y = df.iloc[:, 1].astype(float).to_numpy()
+        # tenta converter colunas não-numéricas (por exemplo quando header existe)
+        try:
+            x = df.iloc[:, 0].astype(float).to_numpy()
+            y = df.iloc[:, 1].astype(float).to_numpy()
+        except Exception as e:
+            raise RuntimeError(f"Erro ao ler colunas do espectro: {e}")
     return x, y
 
 # ---------------------------------------------------------------------
@@ -346,16 +350,29 @@ def fit_peaks_lmfit_global(
 ) -> List[Peak]:
     """
     Ajuste global multi-pico usando lmfit (Voigt/Gauss/Lorentz).
+    Proteções:
+      - remove NaN/inf de x_fit/y_fit
+      - exige número mínimo de pontos
+      - captura exceções do lmfit e faz fallback para ajuste simples
     """
     if not LMFIT_AVAILABLE:
         raise RuntimeError("lmfit não está disponível.")
+
+    # define janela global de ajuste em torno dos picos
     xmin = min(p.position_cm1 for p in peaks) - 20
     xmax = max(p.position_cm1 for p in peaks) + 20
     mask = (x >= xmin) & (x <= xmax)
     x_fit = x[mask]
     y_fit = y[mask]
-    if len(x_fit) < 5:
-        return peaks
+
+    # garante arrays finitos e ordenados
+    finite_mask = np.isfinite(x_fit) & np.isfinite(y_fit)
+    x_fit = x_fit[finite_mask]
+    y_fit = y_fit[finite_mask]
+
+    if x_fit.size < 10:
+        # insuficiente para ajuste global -> fallback sem lmfit
+        return _fallback_fit_per_peak(x, y, peaks)
 
     def make_model(prefix):
         if model_type.lower() == "gaussian":
@@ -365,26 +382,44 @@ def fit_peaks_lmfit_global(
         else:
             return VoigtModel(prefix=prefix)
 
-    model = None    # type: ignore
+    model = None  # type: ignore
     for i, p in enumerate(peaks):
         m = make_model(f"p{i}_")
         model = m if model is None else (model + m)
 
     params = model.make_params()
+    # inicializa parâmetros com cuidados
     for i, p in enumerate(peaks):
         pref = f"p{i}_"
-        cen = p.position_cm1
-        amp = max(1e-6, p.intensity * 10.0)
+        cen = float(p.position_cm1)
+        # amplitude inicial baseada no máximo local (ou pequeno valor)
+        # busca pico local no intervalo +/- 5 cm-1 usando x_fit
+        local_mask = (x_fit >= cen - 5) & (x_fit <= cen + 5)
+        amp0 = float(np.max(y_fit[local_mask])) if np.any(local_mask) else max(1e-6, float(p.intensity or 1e-6))
+        amp0 = max(amp0, 1e-8)
         sigma0 = 3.0
-        params[f"{pref}center"].set(value=cen, min=cen - 10, max=cen + 10)
-        params[f"{pref}amplitude"].set(value=amp, min=0)
+        # define bounds seguros
+        try:
+            params[f"{pref}center"].set(value=cen, min=cen - 10, max=cen + 10)
+        except Exception:
+            # alguns modelos usam 'center' ou 'c' - tente alternativos
+            if f"{pref}c" in params:
+                params[f"{pref}c"].set(value=cen, min=cen - 10, max=cen + 10)
+        if f"{pref}amplitude" in params:
+            params[f"{pref}amplitude"].set(value=amp0, min=0)
         if f"{pref}sigma" in params:
-            params[f"{pref}sigma"].set(value=sigma0, min=0.1, max=50)
+            params[f"{pref}sigma"].set(value=sigma0, min=0.1, max=200)
         if f"{pref}gamma" in params:
-            params[f"{pref}gamma"].set(value=sigma0, min=0.1, max=50)
+            params[f"{pref}gamma"].set(value=sigma0, min=0.1, max=200)
 
-    result = model.fit(y_fit, params, x=x_fit)
+    # executar ajuste com try/except
+    try:
+        result = model.fit(y_fit, params, x=x_fit)
+    except Exception as e:
+        # fallback para ajustes simples por pico (robusto)
+        return _fallback_fit_per_peak(x, y, peaks)
 
+    # popular resultados nos objetos Peak
     for i, p in enumerate(peaks):
         pref = f"p{i}_"
         fit_params = {}
@@ -394,10 +429,35 @@ def fit_peaks_lmfit_global(
         p.fit_params = fit_params
         if "center" in fit_params:
             p.position_cm1 = fit_params["center"]
+        elif "c" in fit_params:
+            p.position_cm1 = fit_params["c"]
         if "amplitude" in fit_params:
             p.intensity = fit_params["amplitude"]
         if "sigma" in fit_params:
             p.width = fit_params["sigma"]
+        if "gamma" in fit_params and p.width is None:
+            p.width = fit_params["gamma"]
+    return peaks
+
+def _fallback_fit_per_peak(x, y, peaks: List[Peak]) -> List[Peak]:
+    """
+    Faz ajuste simples (fit_peak_simple) em cada pico individualmente.
+    Usado quando lmfit falha ou não é aplicável.
+    """
+    for p in peaks:
+        try:
+            res = fit_peak_simple(x, y, p.position_cm1, window=8.0)
+            if res:
+                p.fit_params = res["params"]
+                if "cen" in res["params"]:
+                    p.position_cm1 = float(res["params"]["cen"])
+                if "amp" in res["params"]:
+                    p.intensity = float(res["params"]["amp"])
+                if "wid" in res["params"]:
+                    p.width = float(res["params"]["wid"])
+        except Exception:
+            # ignora erro em pico específico
+            continue
     return peaks
 
 def fit_peaks(x, y, peaks: List[Peak], use_lmfit: bool = True) -> List[Peak]:
@@ -447,6 +507,7 @@ def apply_base_wavenumber_correction(
 ) -> np.ndarray:
     """
     Aplica polinômio fixo de calibração (obtido previamente) ao eixo bruto.
+    Observação: espera coeficientes no formato np.polyval (highest-order first).
     """
     base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
     return np.polyval(base_poly_coeffs, x_obs)
@@ -478,18 +539,27 @@ def calibrate_with_fixed_pattern_and_silicon(
         "normalize": False,
     }
 
+    # valida base_poly_coeffs para evitar polinômio constante que colapsa o eixo
+    base_poly_coeffs = np.asarray(base_poly_coeffs, dtype=float)
+    calib_warning: Optional[str] = None
+    if base_poly_coeffs.ndim == 0:
+        base_poly_coeffs = np.atleast_1d(base_poly_coeffs)
+    if base_poly_coeffs.size == 1:
+        calib_warning = (
+            "Coeficientes do polinômio base têm um único valor (constante). "
+            "Usando mapeamento identidade para evitar eixo constante."
+        )
+        base_poly_coeffs = np.array([1.0, 0.0], dtype=float)
+
     # 1) SILÍCIO
     tick(5, "Carregando Silício...")
     x_si_raw, y_si_raw = load_spectrum(silicon_file)
-
     x_si, y_si, _ = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
 
     tick(20, "Aplicando polinômio base ao Silício...")
     x_si_base = apply_base_wavenumber_correction(x_si, base_poly_coeffs)
 
-    # tentativa 1: janela 480-560
     mask_si = (x_si_base >= 480) & (x_si_base <= 560)
-
     si_cal_base: Optional[float] = None
     warning: Optional[str] = None
 
@@ -498,7 +568,6 @@ def calibrate_with_fixed_pattern_and_silicon(
         x_si_region = x_si_base[mask_si]
         si_cal_base = float(x_si_region[idx_max])
     else:
-        # tentativa 2: janela expandida 400-700
         tick(30, "Janela Si vazia — expandindo janela (400–700 cm⁻¹)...")
         mask_si2 = (x_si_base >= 400) & (x_si_base <= 700)
         if np.any(mask_si2):
@@ -506,7 +575,6 @@ def calibrate_with_fixed_pattern_and_silicon(
             x_si_region = x_si_base[mask_si2]
             si_cal_base = float(x_si_region[idx_max])
         else:
-            # tentativa 3: busca automática de picos
             tick(45, "Buscando picos de Si por detecção automática...")
             try:
                 x_uniform = np.linspace(
@@ -514,16 +582,15 @@ def calibrate_with_fixed_pattern_and_silicon(
                     max(800, len(x_si_base))
                 )
                 y_uniform = np.interp(x_uniform, x_si_base, y_si)
-
                 lw = 11 if len(y_uniform) > 11 else (len(y_uniform) // 2) * 2 + 1
                 if lw >= 5:
                     y_smooth = savgol_filter(y_uniform, lw, polyorder=3)
                 else:
                     y_smooth = y_uniform
 
-                peaks_idx, props = find_peaks(
+                peaks_idx, _props = find_peaks(
                     y_smooth,
-                    height=np.max(y_smooth) * 0.1,
+                    height=np.max(y_smooth) * 0.1 if np.max(y_smooth) > 0 else 0,
                     distance=5,
                     prominence=0.02,
                 )
@@ -536,7 +603,6 @@ def calibrate_with_fixed_pattern_and_silicon(
             except Exception:
                 warning = "Erro ao tentar detectar pico de Silício automaticamente."
 
-    # se ainda não achou, delta = 0
     if si_cal_base is None:
         tick(60, "Não encontrado pico Si: usando delta = 0 e prosseguindo (ver warning).")
         delta = 0.0
@@ -576,6 +642,8 @@ def calibrate_with_fixed_pattern_and_silicon(
     }
     if warning:
         calibration_info["warning"] = str(warning)
+    if calib_warning:
+        calibration_info["warning"] = (calibration_info.get("warning", "") + " " + calib_warning).strip()
 
     return {
         "x_sample_raw": x_s_raw,
