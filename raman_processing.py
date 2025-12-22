@@ -1,6 +1,18 @@
 # raman_processing.py
 # -*- coding: utf-8 -*-
 
+"""
+Pipeline Raman completo:
+- Leitura de espectros
+- Subtração de substrato
+- Despike, suavização, baseline e normalização
+- Detecção e ajuste de picos
+- Mapeamento molecular
+- Inferência exploratória baseada em regras (NÃO diagnóstico)
+- Extração de features para ML
+- Mapa de densidade espectral
+"""
+
 import io
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional, Any
@@ -22,19 +34,13 @@ try:
 except Exception:
     LMFIT_AVAILABLE = False
 
-try:
-    import h5py
-    H5PY_AVAILABLE = True
-except Exception:
-    H5PY_AVAILABLE = False
-
 # ---------------------------------------------------------------------
-# MAPA MOLECULAR
+# MAPA MOLECULAR (SANGUE / BIOLÓGICO)
 # ---------------------------------------------------------------------
 MOLECULAR_MAP = [
+    {"range": (720, 735), "group": "Adenina / nucleotídeos (DNA/RNA)"},
     {"range": (730, 750), "group": "Hemoglobina / porfirinas"},
     {"range": (748, 755), "group": "Citocromo c / heme"},
-    {"range": (720, 735), "group": "Adenina / nucleotídeos (DNA/RNA)"},
     {"range": (780, 790), "group": "DNA/RNA – ligações fosfato"},
     {"range": (820, 850), "group": "Proteínas – C–C / tirosina"},
     {"range": (935, 955), "group": "Proteínas – esqueleto α-hélice"},
@@ -52,12 +58,12 @@ MOLECULAR_MAP = [
 ]
 
 # ---------------------------------------------------------------------
-# REGRAS EXPLORATÓRIAS
+# REGRAS EXPLORATÓRIAS (CIENTÍFICAS, NÃO DIAGNÓSTICAS)
 # ---------------------------------------------------------------------
 DISEASE_RULES = [
     {
         "name": "Alteração hemoglobina",
-        "description": "Alterações estruturais no grupo heme/porfirinas.",
+        "description": "Possíveis alterações estruturais no grupo heme/porfirinas.",
         "groups_required": ["Hemoglobina / porfirinas", "Citocromo c / heme"],
     },
     {
@@ -71,7 +77,7 @@ DISEASE_RULES = [
     },
     {
         "name": "Alteração lipídica de membrana",
-        "description": "Modificações em lipídios de membrana.",
+        "description": "Modificações estruturais em lipídios de membrana.",
         "groups_required": [
             "Lipídios – CH2 deformação",
             "Lipídios – CH2 torção",
@@ -81,7 +87,7 @@ DISEASE_RULES = [
 ]
 
 # ---------------------------------------------------------------------
-# DATACLASS
+# DATACLASS DE PICO
 # ---------------------------------------------------------------------
 @dataclass
 class Peak:
@@ -92,7 +98,7 @@ class Peak:
     fit_params: Optional[Dict[str, Any]] = None
 
 # ---------------------------------------------------------------------
-# LEITURA DE ESPECTRO
+# LEITURA DO ESPECTRO
 # ---------------------------------------------------------------------
 def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
     name = getattr(file_like, "name", "").lower()
@@ -125,7 +131,7 @@ def subtract_substrate(x, y, x_sub, y_sub):
     return y_corr
 
 # ---------------------------------------------------------------------
-# DESPIKE / BASELINE / PREPROCESS
+# PREPROCESSAMENTO
 # ---------------------------------------------------------------------
 def despike(y, method="median", k=5):
     if method == "median":
@@ -178,7 +184,7 @@ def preprocess_spectrum(
     return x, y, {}
 
 # ---------------------------------------------------------------------
-# AJUSTE DE PICO (lmfit)
+# AJUSTE DE PICO (OPCIONAL)
 # ---------------------------------------------------------------------
 def fit_peak_lmfit(x, y, center, window=10.0, model="voigt"):
     if not LMFIT_AVAILABLE:
@@ -230,42 +236,33 @@ def map_peaks_to_molecular_groups(peaks):
     return peaks
 
 # ---------------------------------------------------------------------
-# MAPA DE PREDOMINÂNCIA DE PICOS
+# INFERÊNCIA EXPLORATÓRIA (SEM DIAGNÓSTICO)
 # ---------------------------------------------------------------------
-def compute_peak_density(
-    peaks,
-    x_min=400,
-    x_max=1800,
-    bin_width=2.0,
-    smooth_window=21,
-    polyorder=3,
-):
+def infer_diseases(peaks):
     if not peaks:
-        return None, None
+        return []
 
-    pos = np.array([p.position_cm1 for p in peaks])
-    bins = np.arange(x_min, x_max + bin_width, bin_width)
-    hist, edges = np.histogram(pos, bins=bins)
+    detected_groups = {p.group for p in peaks if p.group}
+    results = []
 
-    x_centers = 0.5 * (edges[:-1] + edges[1:])
-    y = hist.astype(float)
+    for rule in DISEASE_RULES:
+        required = set(rule["groups_required"])
+        matched = required.intersection(detected_groups)
+        confidence = len(matched) / len(required)
 
-    if len(y) > smooth_window:
-        if smooth_window % 2 == 0:
-            smooth_window += 1
-        y = savgol_filter(y, smooth_window, polyorder)
+        if confidence >= 0.5:
+            results.append({
+                "name": rule["name"],
+                "description": rule["description"],
+                "matched_groups": list(matched),
+                "confidence": round(confidence, 2),
+                "note": "Inferência exploratória baseada em regras Raman"
+            })
 
-    baseline = baseline_als(y, lam=1e4, p=0.01)
-    y = y - baseline
-    y[y < 0] = 0.0
-
-    if y.max() > 0:
-        y /= y.max()
-
-    return x_centers, y
+    return results
 
 # ---------------------------------------------------------------------
-# FEATURES ML-READY
+# FEATURES PARA ML
 # ---------------------------------------------------------------------
 def build_ml_features_from_peaks(peaks):
     features = {}
@@ -285,6 +282,25 @@ def build_ml_features_from_peaks(peaks):
     features["max_intensity"] = float(np.max(intens)) if intens else 0.0
 
     return features
+
+# ---------------------------------------------------------------------
+# MAPA DE DENSIDADE DE PICOS
+# ---------------------------------------------------------------------
+def compute_peak_density(peaks, x_min=400, x_max=1800, bin_width=2.0):
+    if not peaks:
+        return None, None
+
+    pos = np.array([p.position_cm1 for p in peaks])
+    bins = np.arange(x_min, x_max + bin_width, bin_width)
+    hist, edges = np.histogram(pos, bins=bins)
+
+    x_centers = 0.5 * (edges[:-1] + edges[1:])
+    y = hist.astype(float)
+
+    if y.max() > 0:
+        y /= y.max()
+
+    return x_centers, y
 
 # ---------------------------------------------------------------------
 # PIPELINE COMPLETO
@@ -318,9 +334,9 @@ def process_raman_spectrum_with_groups(
     )
 
     peaks = map_peaks_to_molecular_groups(peaks)
+
     diseases = infer_diseases(peaks)
     features = build_ml_features_from_peaks(peaks)
-
     x_density, y_density = compute_peak_density(peaks)
 
     return {
@@ -335,38 +351,3 @@ def process_raman_spectrum_with_groups(
         "y_density": y_density,
         "meta": meta,
     }
-
-# ---------------------------------------------------------------------
-# INFERÊNCIA EXPLORATÓRIA (NÃO DIAGNÓSTICA)
-# ---------------------------------------------------------------------
-def infer_diseases(peaks):
-    """
-    Inferência exploratória baseada em regras espectrais.
-    NÃO constitui diagnóstico médico.
-    Retorna padrões espectrais compatíveis com alterações moleculares.
-    """
-
-    if not peaks:
-        return []
-
-    detected_groups = {p.group for p in peaks if p.group}
-
-    results = []
-
-    for rule in DISEASE_RULES:
-        required = set(rule["groups_required"])
-
-        matched = required.intersection(detected_groups)
-        confidence = len(matched) / len(required)
-
-        if confidence >= 0.5:
-            results.append({
-                "name": rule["name"],
-                "description": rule["description"],
-                "matched_groups": list(matched),
-                "confidence": round(confidence, 2),
-                "note": "Inferência exploratória baseada em regras Raman"
-            })
-
-    return results
-
