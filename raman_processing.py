@@ -336,6 +336,48 @@ def process_raman_spectrum_with_groups(
         "features": features,
         "meta": meta,
     }
+# ---------------------------------------------------------------------
+# MAPA DE PREDOMINÂNCIA DE PICOS
+# ---------------------------------------------------------------------
+def compute_peak_density(
+    peaks,
+    x_min=400,
+    x_max=1800,
+    bin_width=2.0,
+    smooth_window=21,
+    polyorder=3,
+):
+    """
+    Calcula a densidade/predominância de picos ao longo do eixo Raman.
+    Retorna eixo x e densidade normalizada com baseline corrigida.
+    """
+    if not peaks:
+        return None, None
+
+    peak_positions = np.array([p.position_cm1 for p in peaks])
+
+    bins = np.arange(x_min, x_max + bin_width, bin_width)
+    hist, edges = np.histogram(peak_positions, bins=bins)
+
+    x_centers = 0.5 * (edges[:-1] + edges[1:])
+    y = hist.astype(float)
+
+    # Suavização
+    if len(y) > smooth_window:
+        if smooth_window % 2 == 0:
+            smooth_window += 1
+        y = savgol_filter(y, smooth_window, polyorder)
+
+    # Correção de linha de base
+    baseline = baseline_als(y, lam=1e4, p=0.01)
+    y_corr = y - baseline
+    y_corr[y_corr < 0] = 0.0
+
+    # Normalização
+    if y_corr.max() > 0:
+        y_corr /= y_corr.max()
+
+    return x_centers, y_corr
 
 # ---------------------------------------------------------------------
 # EXPORTAÇÃO HDF5
