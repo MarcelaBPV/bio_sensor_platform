@@ -1,6 +1,12 @@
 # app.py
 # -*- coding: utf-8 -*-
 
+"""
+BioRaman — Plataforma Integrada
+Raman • Questionário • Otimizador ML
+⚠ Uso exclusivo em pesquisa.
+"""
+
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -8,34 +14,35 @@ import uuid
 
 import raman_processing as rp
 from ml_otimizador import train_random_forest_from_features, MLConfig
-from supabase_repository import (
-    insert_sample, insert_spectrum, insert_peaks, insert_ml_features
-)
 
+# =========================================================
+# CONFIGURAÇÃO
+# =========================================================
 st.set_page_config(page_title="BioRaman", layout="wide")
 st.title("🧬 BioRaman — Plataforma Integrada")
 
 # =========================================================
-# SESSION STATE
+# SESSION STATE SEGURO
 # =========================================================
-for k in [
-    "raman_results",
-    "ml_dataset",
-    "questionario_df",
-    "last_sample_id",
-    "last_spectrum_id",
-]:
-    if k not in st.session_state:
-        st.session_state[k] = None if "df" not in k else pd.DataFrame()
+if "raman_results" not in st.session_state:
+    st.session_state.raman_results = None
+
+if "ml_dataset" not in st.session_state:
+    st.session_state.ml_dataset = pd.DataFrame()
+
+if "ml_result" not in st.session_state:
+    st.session_state.ml_result = None
+
+if "sample_code" not in st.session_state:
+    st.session_state.sample_code = f"AMOSTRA_{uuid.uuid4().hex[:6].upper()}"
 
 # =========================================================
 # ABAS
 # =========================================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Raman",
-    "Questionário",
-    "Estatística Raman × Questionário",
-    "Otimizador / ML"
+tab1, tab2, tab3 = st.tabs([
+    "🔬 Raman",
+    "📋 Questionário",
+    "📊 Otimizador / Estatísticas"
 ])
 
 # =========================================================
@@ -44,12 +51,24 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.header("Processamento Raman")
 
-    sample_file = st.file_uploader("Upload do espectro Raman")
+    with st.form("raman_form"):
+        sample_file = st.file_uploader(
+            "Upload espectro Raman",
+            type=["txt", "csv", "xls", "xlsx"]
+        )
 
-    if sample_file and st.button("▶ Processar espectro"):
-        with st.spinner("Processando espectro..."):
-            st.session_state.raman_results = rp.process_raman_spectrum_with_groups(sample_file)
-        st.success("Processamento concluído.")
+        fit_model = st.selectbox(
+            "Ajuste de pico",
+            [None, "gauss", "lorentz", "voigt"]
+        )
+
+        submit_raman = st.form_submit_button("▶ Processar")
+
+    if submit_raman and sample_file:
+        st.session_state.raman_results = rp.process_raman_spectrum_with_groups(
+            sample_file,
+            fit_model=fit_model
+        )
 
     if st.session_state.raman_results:
         data = st.session_state.raman_results
@@ -60,93 +79,85 @@ with tab1:
         ax.set_ylabel("Intensidade (u.a.)")
         st.pyplot(fig)
 
-        if st.button("💾 Salvar no Supabase"):
-            with st.spinner("Salvando no banco..."):
-                sid = insert_sample(
-                    sample_code=f"AMOSTRA_{uuid.uuid4().hex[:6]}",
-                    sample_type="sangue",
-                    metadata={}
-                )
-                spid = insert_spectrum(
-                    sid, "processed",
-                    data["x_proc"].tolist(),
-                    data["y_proc"].tolist(),
-                    data["meta"]
-                )
-                insert_peaks(spid, data["peaks"])
-
-                st.session_state.last_sample_id = sid
-                st.session_state.last_spectrum_id = spid
-
-            st.success("Salvo com sucesso.")
+        st.subheader("Picos detectados")
+        df_peaks = pd.DataFrame([
+            {
+                "cm⁻¹": p.position_cm1,
+                "Intensidade": p.intensity,
+                "Grupo": p.group
+            }
+            for p in data["peaks"]
+        ])
+        st.dataframe(df_peaks, use_container_width=True)
 
 # =========================================================
 # ABA 2 — QUESTIONÁRIO
 # =========================================================
 with tab2:
-    st.header("Questionário")
+    st.header("Questionário / Dados Clínicos")
 
     q_file = st.file_uploader("Upload CSV do questionário", type=["csv"])
+
     if q_file:
-        st.session_state.questionario_df = pd.read_csv(q_file)
-        st.dataframe(st.session_state.questionario_df.head())
+        df_q = pd.read_csv(q_file)
+        st.session_state.questionnaire = df_q
+        st.dataframe(df_q.head(), use_container_width=True)
 
 # =========================================================
-# ABA 3 — ESTATÍSTICA RAMAN × QUESTIONÁRIO
+# ABA 3 — OTIMIZADOR / ESTATÍSTICAS
 # =========================================================
 with tab3:
-    st.header("Estatística Integrada")
-
-    df_q = st.session_state.questionario_df
-    data = st.session_state.raman_results
-
-    if df_q is None or df_q.empty or data is None:
-        st.info("Carregue espectro Raman e questionário.")
-    else:
-        st.subheader("Distribuição por gênero")
-        if "genero" in df_q.columns:
-            st.bar_chart(df_q["genero"].value_counts())
-
-        st.subheader("Fumantes vs Não fumantes")
-        if "fumante" in df_q.columns:
-            st.bar_chart(df_q["fumante"].value_counts())
-
-        st.subheader("Doenças declaradas")
-        if "doenca" in df_q.columns:
-            st.bar_chart(df_q["doenca"].value_counts())
-
-# =========================================================
-# ABA 4 — OTIMIZADOR / ML
-# =========================================================
-with tab4:
-    st.header("Otimizador — Machine Learning")
+    st.header("Otimizador ML & Estatísticas")
 
     if st.session_state.raman_results is None:
-        st.info("Processe espectros primeiro.")
-    else:
-        label = st.text_input("Classe / rótulo")
+        st.info("Processe um espectro Raman primeiro.")
+        st.stop()
 
-        if st.button("➕ Adicionar ao dataset ML"):
-            row = {
-                **st.session_state.raman_results["features"],
-                "label": label
-            }
-            st.session_state.ml_dataset = pd.concat(
-                [st.session_state.ml_dataset, pd.DataFrame([row])],
-                ignore_index=True
+    label = st.text_input("Classe da amostra (ex.: controle, diabetes)")
+
+    if st.button("➕ Adicionar ao dataset ML"):
+        row = {
+            **st.session_state.raman_results["features"],
+            "label": label,
+        }
+        st.session_state.ml_dataset = pd.concat(
+            [st.session_state.ml_dataset, pd.DataFrame([row])],
+            ignore_index=True,
+        )
+
+    if not st.session_state.ml_dataset.empty:
+        st.subheader("Dataset ML")
+        st.dataframe(st.session_state.ml_dataset)
+
+        if st.button("🚀 Treinar Random Forest"):
+            st.session_state.ml_result = train_random_forest_from_features(
+                st.session_state.ml_dataset,
+                label_col="label",
+                config=MLConfig(),
             )
-            st.success("Amostra adicionada.")
 
-        if st.session_state.ml_dataset is not None and not st.session_state.ml_dataset.empty:
-            st.dataframe(st.session_state.ml_dataset)
+    if st.session_state.ml_result:
+        res = st.session_state.ml_result
 
-            if st.button("🚀 Treinar Random Forest"):
-                result = train_random_forest_from_features(
-                    st.session_state.ml_dataset,
-                    label_col="label",
-                    config=MLConfig()
+        st.metric("Acurácia", f"{res.accuracy:.2f}")
+        st.text(res.report_text)
+
+        st.subheader("Importância das features")
+        st.dataframe(res.feature_importances.head(10))
+
+    # ---------- ESTATÍSTICAS DO QUESTIONÁRIO ----------
+    if "questionnaire" in st.session_state:
+        st.markdown("---")
+        st.subheader("Estatísticas Questionário")
+
+        df_q = st.session_state.questionnaire
+
+        for col in ["genero", "fumante", "doenca"]:
+            if col in df_q.columns:
+                fig, ax = plt.subplots()
+                df_q[col].value_counts(normalize=True).plot(
+                    kind="bar",
+                    ax=ax
                 )
-
-                st.metric("Acurácia", f"{result.accuracy:.2f}")
-                st.text(result.report_text)
-                st.dataframe(result.feature_importances.head(10))
+                ax.set_title(f"Distribuição por {col}")
+                st.pyplot(fig)
