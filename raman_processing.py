@@ -335,3 +335,38 @@ def process_raman_spectrum_with_groups(
         "y_density": y_density,
         "meta": meta,
     }
+
+# ---------------------------------------------------------------------
+# INFERÊNCIA EXPLORATÓRIA (NÃO DIAGNÓSTICA)
+# ---------------------------------------------------------------------
+def infer_diseases(peaks):
+    """
+    Inferência exploratória baseada em regras espectrais.
+    NÃO constitui diagnóstico médico.
+    Retorna padrões espectrais compatíveis com alterações moleculares.
+    """
+
+    if not peaks:
+        return []
+
+    detected_groups = {p.group for p in peaks if p.group}
+
+    results = []
+
+    for rule in DISEASE_RULES:
+        required = set(rule["groups_required"])
+
+        matched = required.intersection(detected_groups)
+        confidence = len(matched) / len(required)
+
+        if confidence >= 0.5:
+            results.append({
+                "name": rule["name"],
+                "description": rule["description"],
+                "matched_groups": list(matched),
+                "confidence": round(confidence, 2),
+                "note": "Inferência exploratória baseada em regras Raman"
+            })
+
+    return results
+
