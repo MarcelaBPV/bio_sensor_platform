@@ -1,427 +1,235 @@
-# raman_processing.py
+# app.py
 # -*- coding: utf-8 -*-
+
 """
-Módulo de processamento Raman:
-- load_spectrum
-- despike_median
-- baseline_als (esparsa, robusta)
-- preprocess_spectrum
-- detect_peaks, map_peaks_to_molecular_groups, infer_diseases
-- calibrate_with_fixed_pattern_and_silicon (requere silicon, sample, blank)
-- process_raman_spectrum_with_groups (fluxo alto-nível)
+BioRaman — Plataforma integrada
+- Processamento Raman
+- Detecção de picos e grupos moleculares
+- Correlação com padrões (regras)
+- Questionário / pacientes
+⚠ Uso em pesquisa. NÃO é diagnóstico médico.
 """
 
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional, Any
-
-import numpy as np
+import streamlit as st
 import pandas as pd
-from scipy.signal import find_peaks, savgol_filter, medfilt
-from scipy.sparse import diags, csc_matrix, identity
-from scipy.sparse.linalg import spsolve
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Any, List, Optional
+import io
 
-# -------------------------
-# Configs / mapas (edite conforme necessário)
-# -------------------------
-MOLECULAR_MAP: List[Dict[str, Any]] = [
+import raman_processing as rp
 
-    # =========================================
-    # 1) AROMÁTICOS / AMINOÁCIDOS
-    # =========================================
-    {"range": (995, 1007), "group": "Fenilalanina (~1001 cm⁻¹)"},
-    {"range": (1000, 1008), "group": "Fenilalanina (~1003 cm⁻¹)"},
+# =========================================================
+# CONFIGURAÇÃO GERAL
+# =========================================================
+st.set_page_config(page_title="BioRaman", layout="wide")
+st.title("🧬 BioRaman — Plataforma de Processamento Raman")
 
-    # =========================================
-    # 2) NUCLEOTÍDEOS / DNA / RNA
-    # =========================================
-    {"range": (780, 795), "group": "DNA/RNA fosfodiéster (~786 cm⁻¹)"},
-    {"range": (1078, 1092), "group": "PO₂⁻ simétrico / DNA (~1085 cm⁻¹)"},
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.grid": True,
+    "grid.linestyle": "--",
+    "grid.alpha": 0.3,
+})
 
-    # =========================================
-    # 3) PROTEÍNAS / PEPTÍDEOS
-    # =========================================
-    {"range": (1118, 1126), "group": "C–N (~1122 cm⁻¹)"},
-    {"range": (1235, 1255), "group": "Amida III (~1247 cm⁻¹)"},
-    {"range": (1510, 1545), "group": "Amida II (~1530–1540 cm⁻¹)"},
-    {"range": (1650, 1675), "group": "Amida I (C=O) (~1655 cm⁻¹)"},
+# =========================================================
+# SESSION STATE (ESSENCIAL)
+# =========================================================
+if "raman_results" not in st.session_state:
+    st.session_state.raman_results = None
 
-    # =========================================
-    # 4) LIPÍDIOS / MEMBRANA CELULAR
-    # =========================================
-    {"range": (1300, 1315), "group": "CH₂ twist (~1305 cm⁻¹)"},
-    {"range": (1328, 1344), "group": "CH₂/CH₃ (~1336 cm⁻¹)"},
-    {"range": (1374, 1386), "group": "CH₃ stretch (~1380 cm⁻¹)"},
-    {"range": (1440, 1470), "group": "CH₂/CH₃ deform. (~1450 cm⁻¹)"},
-    {"range": (1730, 1745), "group": "C=O ester (lipídios oxid.) (~1738 cm⁻¹)"},
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
+def fig_to_png_bytes(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
+    buf.seek(0)
+    return buf.getvalue()
 
-    # =========================================
-    # 5) HEMOGLOBINA / PORFIRINAS
-    # =========================================
-    {"range": (700, 740),  "group": "Porfirinas (banda baixa)"},
-    {"range": (1355, 1375), "group": "Heme ν₄ (~1365 cm⁻¹)"},
-    {"range": (1540, 1580), "group": "Hemoglobina (~1568 cm⁻¹)"},
-    {"range": (1590, 1628), "group": "Porfirina / Amida I (~1597–1624 cm⁻¹)"},
-    {"range": (1620, 1640), "group": "Heme ν₁₀ (~1630 cm⁻¹)"},
+def df_to_csv_bytes(df: pd.DataFrame):
+    return df.to_csv(index=False).encode("utf-8")
 
-    # =========================================
-    # 6) CAROTENOIDES
-    # =========================================
-    {"range": (1145, 1165), "group": "Carotenoide ν₂ (~1156 cm⁻¹)"},
-    {"range": (1505, 1525), "group": "Carotenoide ν₁ (~1515 cm⁻¹)"},
+# =========================================================
+# SIDEBAR — PARÂMETROS
+# =========================================================
+with st.sidebar:
+    st.header("Parâmetros Raman")
 
-    # =========================================
-    # 7) SUBSTRATO — PAPEL (celulose)
-    # =========================================
-    {"range": (380, 410), "group": "Celulose (~395 cm⁻¹)"},
-    {"range": (520, 535), "group": "Celulose (~525 cm⁻¹)"},
-    {"range": (890, 910), "group": "Celulose (~900 cm⁻¹)"},
-    {"range": (1080, 1100), "group": "Celulose (~1095 cm⁻¹)"},
-    {"range": (1110, 1130), "group": "Celulose (~1120 cm⁻¹)"},
-    {"range": (1365, 1385), "group": "Celulose (~1375 cm⁻¹)"},
-    {"range": (1415, 1435), "group": "Celulose (~1425 cm⁻¹)"},
+    use_despike = st.checkbox("Remover spikes", True)
+    smooth = st.checkbox("Suavizar (Savitzky–Golay)", True)
+    window_length = st.slider("Janela SG", 5, 201, 9, step=2)
+    polyorder = st.slider("Ordem SG", 2, 5, 3)
 
-    # =========================================
-    # 8) SUBSTRATO — PAPEL + PRATA (Ag)
-    # =========================================
-    {"range": (228, 260), "group": "Ag–S ligação (~240 cm⁻¹)"},
-    {"range": (1090, 1100), "group": "Realce SERS Ag sobre celulose (~1095 cm⁻¹)"},
-    {"range": (1350, 1380), "group": "Realce SERS Ag – região de celulose (~1370 cm⁻¹)"},
+    baseline_method = st.selectbox("Linha de base", ["als", "none"])
+    normalize = st.checkbox("Normalizar 0–1", True)
 
-    # =========================================
-    # 9) SUBSTRATO — PAPEL + OURO (Au)
-    # =========================================
-    {"range": (230, 250), "group": "Au–S ligação (~240 cm⁻¹)"},
-    {"range": (1085, 1100), "group": "Aumento Raman Au sobre celulose (~1090 cm⁻¹)"},
-    {"range": (1340, 1390), "group": "Realce Au – região celulose (~1370 cm⁻¹)"},
-]
+    st.markdown("---")
+    st.subheader("Detecção de picos")
+    peak_height = st.slider("Altura mínima", 0.0, 1.0, 0.03, 0.01)
+    peak_prominence = st.slider("Proeminência", 0.0, 1.0, 0.03, 0.01)
+    peak_distance = st.slider("Distância mínima", 1, 500, 5)
 
+# =========================================================
+# ABAS
+# =========================================================
+tab1, tab2 = st.tabs(["Raman", "Questionário / Pacientes"])
 
-DISEASE_RULES: List[Dict[str, Any]] = [
-    {
-        "name": "Alteração hemoglobina",
-        "description": "Padrão compatível com alterações estruturais ou oxidativas em heme e porfirinas.",
-        "groups_required": ["Hemoglobina (~1568 cm⁻¹)", "Porfirina / Amida I (~1597–1624 cm⁻¹)"],
-    },
+# =========================================================
+# ABA 1 — RAMAN
+# =========================================================
+with tab1:
+    st.header("Processamento Raman")
 
-    {
-        "name": "Alteração proteica",
-        "description": "Sinais associados a mudanças conformacionais em proteínas (Amida I / III), podendo refletir inflamação ou desnaturação.",
-        "groups_required": ["Amida III (~1247 cm⁻¹)", "Amida I (C=O) (~1655 cm⁻¹)"],
-    },
+    uploaded = st.file_uploader(
+        "Upload do espectro (.txt, .csv, .xlsx)",
+        type=["txt", "csv", "xls", "xlsx"]
+    )
 
-    {
-        "name": "Alteração lipídica",
-        "description": "Padrão compatível com mudanças em lipídios de membrana, inflamação, danos celulares ou desbalanço metabólico.",
-        "groups_required": ["CH₂/CH₃ (~1336 cm⁻¹)", "CH₂/CH₃ (~1452 cm⁻¹)"],
-    },
-
-    {
-        "name": "Estresse oxidativo",
-        "description": "Associação clássica entre alterações em Fenilalanina e sinais fortes de heme, ligados à inflamação e produção de espécies reativas.",
-        "groups_required": ["Fenilalanina (~1001 cm⁻¹)", "Hemoglobina (~1568 cm⁻¹)"],
-    },
-
-    {
-        "name": "Dano de membrana",
-        "description": "Associação entre CH₃ (~1380 cm⁻¹) e CH₂/CH₃ indica disrupção lipídica e possível apoptose ou necrose.",
-        "groups_required": ["CH₃ (~1380 cm⁻¹)", "CH₂/CH₃ (~1452 cm⁻¹)"],
-    },
-
-    {
-        "name": "Desbalanço aromático",
-        "description": "Variação em aminoácidos aromáticos (Fenilalanina) associada a alterações metabólicas ou inflamação de baixo grau.",
-        "groups_required": ["Fenilalanina (~1001 cm⁻¹)"],
-    },
-
-    {
-        "name": "Alteração estrutural proteica",
-        "description": "Mudanças simultâneas em Amida III e bandas C–N sugerem alterações secundárias ou desnaturação.",
-        "groups_required": ["Amida III (~1247 cm⁻¹)", "C–N (~1122 cm⁻¹)"],
-    },
-]
-
-
-# -------------------------
-# Data classes
-# -------------------------
-@dataclass
-class Peak:
-    position_cm1: float
-    intensity: float
-    group: Optional[str] = None
-
-@dataclass
-class DiseaseMatch:
-    name: str
-    score: int
-    description: str
-
-# -------------------------
-# Leitura de espectro
-# -------------------------
-def load_spectrum(file) -> Tuple[np.ndarray, np.ndarray]:
-    """Lê .txt/.csv/.xls/.xlsx - retorna (x, y)."""
-    filename = getattr(file, "name", "").lower()
-    try:
-        if filename.endswith(".txt"):
-            df = pd.read_csv(file, sep=r"\s+", comment="#", engine="python")
-        elif filename.endswith(".csv"):
+    if uploaded:
+        if st.button("▶ Processar espectro"):
             try:
-                df = pd.read_csv(file)
-            except Exception:
-                file.seek(0)
-                df = pd.read_csv(file, sep=";")
-        elif filename.endswith((".xls", ".xlsx")):
-            df = pd.read_excel(file)
+                preprocess_kwargs = dict(
+                    despike_method="median" if use_despike else None,
+                    smooth=smooth,
+                    window_length=window_length,
+                    polyorder=polyorder,
+                    baseline_method=baseline_method,
+                    normalize=normalize,
+                )
+
+                res = rp.process_raman_spectrum_with_groups(
+                    uploaded,
+                    preprocess_kwargs=preprocess_kwargs,
+                    peak_height=peak_height,
+                    peak_distance=peak_distance,
+                    peak_prominence=peak_prominence,
+                )
+
+                st.session_state.raman_results = res
+                st.success("Processamento concluído.")
+
+            except Exception as e:
+                st.error(f"Erro no processamento: {e}")
+
+    # -----------------------------------------------------
+    # VISUALIZAÇÃO (FORA DO BOTÃO!)
+    # -----------------------------------------------------
+    if st.session_state.raman_results is not None:
+        data = st.session_state.raman_results
+
+        x_raw, y_raw = data["x_raw"], data["y_raw"]
+        x_proc, y_proc = data["x_proc"], data["y_proc"]
+        peaks = data["peaks"]
+        diseases = data["diseases"]
+
+        # ---------------- GRÁFICO ----------------
+        st.subheader("Espectro processado")
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(x_raw, y_raw, label="Bruto", alpha=0.6)
+        ax.plot(x_proc, y_proc, label="Processado", linewidth=1.6)
+        ax.set_xlabel("Raman shift (cm⁻¹)")
+        ax.set_ylabel("Intensidade (u.a.)")
+        ax.legend()
+        st.pyplot(fig)
+
+        st.download_button(
+            "Baixar gráfico (PNG)",
+            fig_to_png_bytes(fig),
+            "raman_spectrum.png",
+            "image/png"
+        )
+
+        # ---------------- TABELA DE PICOS ----------------
+        st.subheader("Tabela — Picos detectados")
+
+        if peaks:
+            df_peaks = pd.DataFrame([
+                {
+                    "Raman shift (cm⁻¹)": round(p.position_cm1, 2),
+                    "Intensidade": round(p.intensity, 5),
+                    "Grupo molecular": p.group or "Não classificado",
+                }
+                for p in peaks
+            ])
+            st.dataframe(df_peaks, use_container_width=True)
+
+            st.download_button(
+                "📥 Baixar picos (CSV)",
+                df_to_csv_bytes(df_peaks),
+                "peaks.csv",
+                "text/csv"
+            )
         else:
-            df = pd.read_csv(file, sep=r"\s+", comment="#", engine="python")
-    except Exception:
-        file.seek(0)
-        text = file.read()
-        if isinstance(text, bytes):
-            text = text.decode(errors="ignore")
-        from io import StringIO
-        df = pd.read_csv(StringIO(text), sep=r"\s+", comment="#", engine="python")
+            st.info("Nenhum pico detectado.")
 
-    df = df.dropna(axis=1, how="all")
-    if df.shape[1] < 2:
-        raise ValueError("Não foi possível identificar colunas X e Y no arquivo.")
+        # ---------------- AGRUPAMENTO ----------------
+        st.subheader("Tabela — Agrupamento molecular")
 
-    numeric_df = df.select_dtypes(include=[np.number])
-    if numeric_df.shape[1] >= 2:
-        x = numeric_df.iloc[:, 0].to_numpy(dtype=float)
-        y = numeric_df.iloc[:, 1].to_numpy(dtype=float)
-    else:
-        x = df.iloc[:, 0].astype(float).to_numpy()
-        y = df.iloc[:, 1].astype(float).to_numpy()
-
-    return x, y
-
-# -------------------------
-# Despike (mediana + zscore)
-# -------------------------
-def despike_median(y: np.ndarray, kernel_size: int = 5, z_thresh: float = 6.0) -> np.ndarray:
-    y = y.astype(float).copy()
-    try:
-        y_med = medfilt(y, kernel_size=kernel_size)
-    except Exception:
-        k = min(kernel_size, len(y) if len(y) % 2 == 1 else len(y) - 1)
-        if k < 3:
-            return y
-        y_med = medfilt(y, kernel_size=k)
-    resid = y - y_med
-    sigma = np.std(resid) + 1e-12
-    z = np.abs(resid) / sigma
-    y[z > z_thresh] = y_med[z > z_thresh]
-    return y
-
-# -------------------------
-# Baseline ALS robusta (sparse)
-# -------------------------
-def baseline_als(y: np.ndarray, lam: float = 1e5, p: float = 0.01, niter: int = 10) -> np.ndarray:
-    y = np.asarray(y, dtype=float).ravel()
-    L = y.size
-    if L < 3:
-        return np.zeros_like(y)
-    # D is (L-2, L) second-difference operator (sparse)
-    D = diags([np.ones(L-2), -2*np.ones(L-2), np.ones(L-2)], [0,1,2], shape=(L-2, L))
-    H = (D.T @ D) * lam  # sparse (L x L)
-    w = np.ones(L, dtype=float)
-    z = np.zeros(L, dtype=float)
-    for _ in range(niter):
-        W = diags(w, 0, shape=(L, L))
-        Z = W + H
-        try:
-            z = spsolve(Z, w * y)
-        except Exception:
-            Zd = Z.toarray()
-            z = np.linalg.solve(Zd, w * y)
-        w = p * (y > z) + (1 - p) * (y < z)
-    return z
-
-# -------------------------
-# Pré-processamento: despike -> baseline -> savgol -> normalize
-# -------------------------
-def preprocess_spectrum(
-    x: np.ndarray,
-    y: np.ndarray,
-    use_despike: bool = True,
-    smooth: bool = True,
-    window_length: int = 9,
-    polyorder: int = 3,
-    baseline_method: Optional[str] = "als",
-    normalize: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    meta: Dict[str, Any] = {}
-    y_proc = y.astype(float).copy()
-
-    if use_despike and len(y_proc) >= 3:
-        y_proc = despike_median(y_proc, kernel_size=5, z_thresh=6.0)
-        meta['despike'] = 'median'
-
-    base = np.zeros_like(y_proc)
-    if baseline_method == "als":
-        base = baseline_als(y_proc, lam=1e5, p=0.01, niter=10)
-        meta['baseline'] = 'als'
-    elif baseline_method is None:
-        meta['baseline'] = 'none'
-    else:
-        raise ValueError(f"baseline_method desconhecido: {baseline_method}")
-
-    y_proc = y_proc - base
-
-    if smooth and len(y_proc) >= 5:
-        wl = window_length
-        if wl >= len(y_proc):
-            wl = len(y_proc) - 1
-        if wl % 2 == 0:
-            wl += 1
-        wl = max(wl, 3)
-        try:
-            y_proc = savgol_filter(y_proc, window_length=wl, polyorder=polyorder)
-            meta['savgol'] = {'window_length': wl, 'polyorder': polyorder}
-        except Exception as e:
-            meta['savgol_error'] = str(e)
-
-    if normalize:
-        ymin = float(np.min(y_proc))
-        ymax = float(np.max(y_proc))
-        if ymax > ymin + 1e-12:
-            y_proc = (y_proc - ymin) / (ymax - ymin)
-            meta['normalize'] = 'minmax'
+        if peaks:
+            df_groups = (
+                df_peaks
+                .groupby("Grupo molecular")
+                .size()
+                .reset_index(name="Número de picos")
+            )
+            st.dataframe(df_groups, use_container_width=True)
         else:
-            meta['normalize'] = 'none'
+            st.info("Sem grupos para agrupar.")
 
-    return x, y_proc, meta
+        # ---------------- CORRELAÇÃO COM DOENÇAS ----------------
+        st.subheader("Correlação com padrões (regras)")
+        st.caption("⚠ Interpretação exploratória — não diagnóstico")
 
-# -------------------------
-# Detect peaks
-# -------------------------
-def detect_peaks(
-    x: np.ndarray,
-    y: np.ndarray,
-    height: float = 0.1,
-    distance: int = 5,
-    prominence: float = 0.02,
-) -> List[Peak]:
-    indices, props = find_peaks(y, height=height, distance=distance, prominence=prominence)
-    peaks = [Peak(position_cm1=float(x[i]), intensity=float(y[i])) for i in indices]
-    return peaks
+        rows = []
+        present_groups = set(df_peaks["Grupo molecular"]) if peaks else set()
 
-# -------------------------
-# Map peaks -> molecular groups
-# -------------------------
-def map_peaks_to_molecular_groups(peaks: List[Peak]) -> List[Peak]:
-    for p in peaks:
-        group_found = None
-        for item in MOLECULAR_MAP:
-            lo, hi = item["range"]
-            if lo <= p.position_cm1 <= hi:
-                group_found = item["group"]
-                break
-        p.group = group_found
-    return peaks
+        for rule in rp.DISEASE_RULES:
+            required = set(rule["groups_required"])
+            score = len(required & present_groups) / max(len(required), 1) * 100
+            rows.append({
+                "Condição": rule["name"],
+                "Grupos requeridos": ", ".join(required),
+                "Correlação (%)": round(score, 1),
+                "Descrição": rule["description"],
+            })
 
-# -------------------------
-# Infer diseases (rules)
-# -------------------------
-def infer_diseases(peaks: List[Peak]) -> List[DiseaseMatch]:
-    groups = {p.group for p in peaks if p.group is not None}
-    matches: List[DiseaseMatch] = []
-    for rule in DISEASE_RULES:
-        required = set(rule["groups_required"])
-        score = len(required.intersection(groups))
-        if score > 0:
-            matches.append(DiseaseMatch(name=rule["name"], score=score, description=rule["description"]))
-    matches.sort(key=lambda m: m.score, reverse=True)
-    return matches
+        df_disease = pd.DataFrame(rows).sort_values("Correlação (%)", ascending=False)
+        st.dataframe(df_disease, use_container_width=True)
 
-# -------------------------
-# High-level processing
-# -------------------------
-def process_raman_spectrum_with_groups(
-    file,
-    preprocess_kwargs: Optional[Dict[str, Any]] = None,
-    peak_height: float = 0.1,
-    peak_distance: int = 5,
-    peak_prominence: float = 0.02,
-) -> Dict[str, Any]:
-    if preprocess_kwargs is None:
-        preprocess_kwargs = {}
-    x_raw, y_raw = load_spectrum(file)
-    x_proc, y_proc, meta = preprocess_spectrum(x_raw, y_raw, **preprocess_kwargs)
-    peaks = detect_peaks(x_proc, y_proc, height=peak_height, distance=peak_distance, prominence=peak_prominence)
-    peaks = map_peaks_to_molecular_groups(peaks)
-    diseases = infer_diseases(peaks)
-    return {
-        "x_raw": x_raw,
-        "y_raw": y_raw,
-        "x_proc": x_proc,
-        "y_proc": y_proc,
-        "peaks": peaks,
-        "diseases": diseases,
-        "meta": meta,
-    }
+        st.download_button(
+            "Baixar correlação (CSV)",
+            df_to_csv_bytes(df_disease),
+            "disease_correlation.csv",
+            "text/csv"
+        )
 
-# -------------------------
-# Calibration workflow requiring 3 uploads
-# -------------------------
-def calibrate_with_fixed_pattern_and_silicon(
-    silicon_file,
-    sample_file,
-    blank_file,
-    base_poly_coeffs: np.ndarray,
-    silicon_ref_position: float = 520.7,
-    preprocess_kwargs: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Workflow que exige os 3 arquivos: silicon, sample, blank."""
-    # validate uploads
-    if silicon_file is None or sample_file is None or blank_file is None:
-        raise ValueError("Forneça os três arquivos: silício, amostra e blank.")
+# =========================================================
+# ABA 2 — QUESTIONÁRIO / PACIENTES
+# =========================================================
+with tab2:
+    st.header("Questionário / Pacientes")
 
-    if preprocess_kwargs is None:
-        preprocess_kwargs = {"use_despike": True, "smooth": True, "window_length": 9, "polyorder": 3, "baseline_method": "als", "normalize": False}
+    q_file = st.file_uploader("Upload CSV do questionário", type=["csv"])
 
-    # silicon
-    x_si_raw, y_si_raw = load_spectrum(silicon_file)
-    x_si, y_si, meta_si = preprocess_spectrum(x_si_raw, y_si_raw, **preprocess_kwargs)
-    # apply base poly (assumes base_poly_coeffs is np.poly coefficients for polyval)
-    x_si_base = np.polyval(np.asarray(base_poly_coeffs, dtype=float), x_si)
-    mask_si = (x_si_base >= 480) & (x_si_base <= 560)
-    if not np.any(mask_si):
-        raise RuntimeError("Janela de Si (480-560 cm^-1) vazia.")
-    idx_rel_max = int(np.argmax(y_si[mask_si]))
-    si_cal_base = float(x_si_base[mask_si][idx_rel_max])
-    delta = silicon_ref_position - si_cal_base
-    def corrector_final(x_obs: np.ndarray) -> np.ndarray:
-        return np.polyval(np.asarray(base_poly_coeffs, dtype=float), x_obs) + delta
-    x_si_cal = corrector_final(x_si)
+    if q_file:
+        df = pd.read_csv(q_file)
+        st.subheader("Pré-visualização")
+        st.dataframe(df.head(), use_container_width=True)
 
-    # sample
-    x_s_raw, y_s_raw = load_spectrum(sample_file)
-    x_s, y_s, meta_s = preprocess_spectrum(x_s_raw, y_s_raw, **preprocess_kwargs)
-    x_s_cal = corrector_final(x_s)
+        st.download_button(
+            "Baixar dados (CSV)",
+            df_to_csv_bytes(df),
+            "questionario.csv",
+            "text/csv"
+        )
 
-    # blank
-    x_b_raw, y_b_raw = load_spectrum(blank_file)
-    x_b, y_b, meta_b = preprocess_spectrum(x_b_raw, y_b_raw, **preprocess_kwargs)
-    x_b_cal = corrector_final(x_b)
-
-    # blank subtraction (interp)
-    y_b_interp = np.interp(x_s_cal, x_b_cal, y_b, left=0.0, right=0.0)
-    y_sample_blank_corrected = y_s - y_b_interp
-
-    return {
-        "x_sample_raw": x_s_raw, "y_sample_raw": y_s_raw,
-        "x_sample_proc": x_s, "y_sample_proc": y_s,
-        "x_sample_calibrated": x_s_cal,
-        "x_blank_raw": x_b_raw, "y_blank_raw": y_b_raw,
-        "x_blank_proc": x_b, "y_blank_proc": y_b,
-        "x_blank_calibrated": x_b_cal,
-        "x_silicon_raw": x_si_raw, "y_silicon_raw": y_si_raw,
-        "x_silicon_proc": x_si, "y_silicon_proc": y_si,
-        "x_silicon_calibrated": x_si_cal,
-        "y_sample_blank_corrected": y_sample_blank_corrected,
-        "meta_sample": meta_s, "meta_blank": meta_b, "meta_silicon": meta_si,
-        "calibration": {"base_poly_coeffs": np.asarray(base_poly_coeffs, dtype=float).tolist(), "si_cal_base": si_cal_base, "silicon_ref_position": silicon_ref_position, "laser_zero_delta": delta},
-    }
+# =========================================================
+# RODAPÉ
+# =========================================================
+st.markdown("---")
+st.caption(
+    "BioRaman • Processamento Raman harmonizado • "
+    "Uso em pesquisa"
+)
