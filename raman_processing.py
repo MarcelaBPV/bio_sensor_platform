@@ -32,10 +32,6 @@ except Exception:
 # MAPA MOLECULAR
 # ---------------------------------------------------------------------
 MOLECULAR_MAP = [
-
-    # =========================
-    # COMPONENTES DO SANGUE
-    # =========================
     {"range": (730, 750), "group": "Hemoglobina / porfirinas"},
     {"range": (748, 755), "group": "Citocromo c / heme"},
     {"range": (720, 735), "group": "Adenina / nucleotídeos (DNA/RNA)"},
@@ -53,31 +49,10 @@ MOLECULAR_MAP = [
     {"range": (1650, 1670), "group": "Amida I (proteínas, C=O)"},
     {"range": (2850, 2885), "group": "Lipídios – CH2 simétrico"},
     {"range": (2920, 2960), "group": "Lipídios / proteínas – CH3"},
-
-    # =========================
-    # PAPEL / CELULOSE
-    # =========================
-    {"range": (375, 385), "group": "Celulose – modos coletivos"},
-    {"range": (435, 460), "group": "Celulose – deformação C–O–C"},
-    {"range": (895, 905), "group": "Celulose – β-glicosídica"},
-    {"range": (1030, 1060), "group": "Celulose – estiramento C–O"},
-    {"range": (1090, 1120), "group": "Celulose – C–O–C assimétrico"},
-    {"range": (1330, 1380), "group": "Celulose – CH / OH"},
-    {"range": (1450, 1470), "group": "Celulose – CH2 deformação"},
-    {"range": (2880, 2940), "group": "Celulose – CH"},
-
-    # =========================
-    # PRATA / SERS
-    # =========================
-    {"range": (180, 260), "group": "Prata – fônons / plasmon"},
-    {"range": (400, 430), "group": "Interação Ag–N"},
-    {"range": (520, 550), "group": "Interação Ag–S / Ag–O"},
-    {"range": (1000, 1025), "group": "Moléculas adsorvidas (SERS hotspot)"},
-    {"range": (1580, 1620), "group": "Aromáticos intensificados por SERS"},
 ]
 
 # ---------------------------------------------------------------------
-# REGRAS (EXPLORATÓRIAS)
+# REGRAS EXPLORATÓRIAS
 # ---------------------------------------------------------------------
 DISEASE_RULES = [
     {
@@ -117,7 +92,7 @@ class Peak:
     fit_params: Optional[Dict[str, Any]] = None
 
 # ---------------------------------------------------------------------
-# LEITURA
+# LEITURA DE ESPECTRO
 # ---------------------------------------------------------------------
 def load_spectrum(file_like) -> Tuple[np.ndarray, np.ndarray]:
     name = getattr(file_like, "name", "").lower()
@@ -232,7 +207,7 @@ def fit_peak_lmfit(x, y, center, window=10.0, model="voigt"):
     }
 
 # ---------------------------------------------------------------------
-# PICOS
+# DETECÇÃO DE PICOS
 # ---------------------------------------------------------------------
 def detect_peaks(x, y, height=0.05, distance=5, prominence=0.02, fit_model=None):
     idx, _ = find_peaks(y, height=height, distance=distance, prominence=prominence)
@@ -254,26 +229,46 @@ def map_peaks_to_molecular_groups(peaks):
                 break
     return peaks
 
-def infer_diseases(peaks):
-    groups = {p.group for p in peaks if p.group}
-    out = []
-    for rule in DISEASE_RULES:
-        req = set(rule["groups_required"])
-        hit = len(groups & req)
-        if hit:
-            out.append({
-                "name": rule["name"],
-                "score": round(100 * hit / len(req), 1),
-                "description": rule["description"],
-            })
-    return sorted(out, key=lambda x: x["score"], reverse=True)
+# ---------------------------------------------------------------------
+# MAPA DE PREDOMINÂNCIA DE PICOS
+# ---------------------------------------------------------------------
+def compute_peak_density(
+    peaks,
+    x_min=400,
+    x_max=1800,
+    bin_width=2.0,
+    smooth_window=21,
+    polyorder=3,
+):
+    if not peaks:
+        return None, None
+
+    pos = np.array([p.position_cm1 for p in peaks])
+    bins = np.arange(x_min, x_max + bin_width, bin_width)
+    hist, edges = np.histogram(pos, bins=bins)
+
+    x_centers = 0.5 * (edges[:-1] + edges[1:])
+    y = hist.astype(float)
+
+    if len(y) > smooth_window:
+        if smooth_window % 2 == 0:
+            smooth_window += 1
+        y = savgol_filter(y, smooth_window, polyorder)
+
+    baseline = baseline_als(y, lam=1e4, p=0.01)
+    y = y - baseline
+    y[y < 0] = 0.0
+
+    if y.max() > 0:
+        y /= y.max()
+
+    return x_centers, y
 
 # ---------------------------------------------------------------------
 # FEATURES ML-READY
 # ---------------------------------------------------------------------
 def build_ml_features_from_peaks(peaks):
     features = {}
-
     for item in MOLECULAR_MAP:
         g = item["group"]
         features[f"count_{g}"] = 0
@@ -284,8 +279,8 @@ def build_ml_features_from_peaks(peaks):
             features[f"count_{p.group}"] += 1
             features[f"sum_intensity_{p.group}"] += p.intensity
 
-    features["n_peaks"] = len(peaks)
     intens = [p.intensity for p in peaks]
+    features["n_peaks"] = len(peaks)
     features["mean_intensity"] = float(np.mean(intens)) if intens else 0.0
     features["max_intensity"] = float(np.max(intens)) if intens else 0.0
 
@@ -301,7 +296,7 @@ def process_raman_spectrum_with_groups(
     peak_height=0.05,
     peak_distance=5,
     peak_prominence=0.02,
-    fit_model=None,   # "voigt" | "gauss" | "lorentz"
+    fit_model=None,
 ):
     if preprocess_kwargs is None:
         preprocess_kwargs = {}
@@ -326,6 +321,8 @@ def process_raman_spectrum_with_groups(
     diseases = infer_diseases(peaks)
     features = build_ml_features_from_peaks(peaks)
 
+    x_density, y_density = compute_peak_density(peaks)
+
     return {
         "x_raw": x_raw,
         "y_raw": y_raw,
@@ -334,65 +331,7 @@ def process_raman_spectrum_with_groups(
         "peaks": peaks,
         "diseases": diseases,
         "features": features,
+        "x_density": x_density,
+        "y_density": y_density,
         "meta": meta,
     }
-# ---------------------------------------------------------------------
-# MAPA DE PREDOMINÂNCIA DE PICOS
-# ---------------------------------------------------------------------
-def compute_peak_density(
-    peaks,
-    x_min=400,
-    x_max=1800,
-    bin_width=2.0,
-    smooth_window=21,
-    polyorder=3,
-):
-    """
-    Calcula a densidade/predominância de picos ao longo do eixo Raman.
-    Retorna eixo x e densidade normalizada com baseline corrigida.
-    """
-    if not peaks:
-        return None, None
-
-    peak_positions = np.array([p.position_cm1 for p in peaks])
-
-    bins = np.arange(x_min, x_max + bin_width, bin_width)
-    hist, edges = np.histogram(peak_positions, bins=bins)
-
-    x_centers = 0.5 * (edges[:-1] + edges[1:])
-    y = hist.astype(float)
-
-    # Suavização
-    if len(y) > smooth_window:
-        if smooth_window % 2 == 0:
-            smooth_window += 1
-        y = savgol_filter(y, smooth_window, polyorder)
-
-    # Correção de linha de base
-    baseline = baseline_als(y, lam=1e4, p=0.01)
-    y_corr = y - baseline
-    y_corr[y_corr < 0] = 0.0
-
-    # Normalização
-    if y_corr.max() > 0:
-        y_corr /= y_corr.max()
-
-    return x_centers, y_corr
-
-# ---------------------------------------------------------------------
-# EXPORTAÇÃO HDF5
-# ---------------------------------------------------------------------
-def save_to_nexus_bytes(x, y, metadata):
-    if not H5PY_AVAILABLE:
-        raise RuntimeError("h5py não instalado.")
-    bio = io.BytesIO()
-    with h5py.File(bio, "w") as f:
-        e = f.create_group("entry")
-        d = e.create_group("data")
-        d.create_dataset("wavenumber", data=x)
-        d.create_dataset("intensity", data=y)
-        m = e.create_group("metadata")
-        for k, v in metadata.items():
-            m.attrs[str(k)] = str(v)
-    bio.seek(0)
-    return bio.read()
