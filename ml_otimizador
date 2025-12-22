@@ -1,40 +1,16 @@
-# ml_otimizador.py
-# -*- coding: utf-8 -*-
-
-"""
-Módulo de aprendizado de máquina do BioRaman.
-
-Responsabilidades:
-- Receber features moleculares (ML-ready)
-- Treinar modelos Random Forest
-- Avaliar desempenho
-- Retornar importância das variáveis
-
-Uso:
-- Aba 3 do Streamlit
-- Integração com Supabase
-"""
-
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
-
+from typing import Optional
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 
-
-# ---------------------------------------------------------------------
-# CONFIGURAÇÃO DO MODELO
-# ---------------------------------------------------------------------
 @dataclass
 class MLConfig:
     test_size: float = 0.3
     random_state: int = 42
     n_estimators: int = 200
     max_depth: Optional[int] = None
-    min_samples_leaf: int = 1
-
 
 @dataclass
 class MLResult:
@@ -43,37 +19,20 @@ class MLResult:
     report_text: str
     feature_importances: pd.DataFrame
 
-
-# ---------------------------------------------------------------------
-# TREINAMENTO RANDOM FOREST (FEATURES DIRETAS)
-# ---------------------------------------------------------------------
 def train_random_forest_from_features(
-    features_df: pd.DataFrame,
+    df: pd.DataFrame,
     label_col: str = "label",
     config: Optional[MLConfig] = None,
 ) -> MLResult:
-    """
-    Treina Random Forest a partir de features ML-ready.
 
-    Espera:
-    - uma coluna 'label'
-    - demais colunas numéricas como features
-    """
     if config is None:
         config = MLConfig()
 
-    # separa X e y
-    y = features_df[label_col]
-    X = features_df.drop(columns=[label_col])
-
-    # remove rótulos ausentes
-    mask = y.notna()
-    X = X.loc[mask]
-    y = y.loc[mask]
+    y = df[label_col]
+    X = df.drop(columns=[label_col])
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
+        X, y,
         test_size=config.test_size,
         random_state=config.random_state,
         stratify=y if y.nunique() > 1 else None,
@@ -82,7 +41,6 @@ def train_random_forest_from_features(
     model = RandomForestClassifier(
         n_estimators=config.n_estimators,
         max_depth=config.max_depth,
-        min_samples_leaf=config.min_samples_leaf,
         random_state=config.random_state,
         n_jobs=-1,
     )
@@ -93,38 +51,9 @@ def train_random_forest_from_features(
     acc = accuracy_score(y_test, y_pred)
     report = classification_report(y_test, y_pred)
 
-    importances = (
-        pd.DataFrame(
-            {
-                "feature": X.columns,
-                "importance": model.feature_importances_,
-            }
-        )
-        .sort_values("importance", ascending=False)
-        .reset_index(drop=True)
-    )
+    importances = pd.DataFrame({
+        "feature": X.columns,
+        "importance": model.feature_importances_,
+    }).sort_values("importance", ascending=False)
 
-    return MLResult(
-        model=model,
-        accuracy=acc,
-        report_text=report,
-        feature_importances=importances,
-    )
-
-
-# ---------------------------------------------------------------------
-# FUNÇÃO DE ALTO NÍVEL (STREAMLIT)
-# ---------------------------------------------------------------------
-def run_ml_pipeline_from_features(
-    features: Dict[str, float],
-    label: str,
-    config: Optional[MLConfig] = None,
-) -> MLResult:
-    """
-    Executa o pipeline ML a partir de um único espectro.
-
-    - features: dict vindo do raman_processing
-    - label: classe associada à amostra
-    """
-    df = pd.DataFrame([{**features, "label": label}])
-    return train_random_forest_from_features(df, config=config)
+    return MLResult(model, acc, report, importances)
