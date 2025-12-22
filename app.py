@@ -104,49 +104,90 @@ with tab2:
 # ABA 3 — OTIMIZADOR (ML + ESTATÍSTICA)
 # =========================================================
 with tab3:
-    st.header("Otimizador — Estatística Raman × Questionário")
+    st.header("Análise Estatística Raman × Questionário")
 
-    if st.session_state.raman_results is None or st.session_state.questionnaire_df is None:
-        st.info("Carregue Raman e Questionário para habilitar o otimizador.")
-    else:
-        if st.button("📊 Gerar estatísticas integradas"):
-            st.session_state.stats_ready = True
+    if st.session_state.ml_dataset.empty:
+        st.info("Dataset ainda vazio. Processe espectros e salve features.")
+        st.stop()
 
-        if st.session_state.stats_ready:
-            df_q = st.session_state.questionnaire_df.copy()
-            features = st.session_state.raman_results["features"]
+    df = st.session_state.ml_dataset.copy()
 
-            # ----------------------------
-            # Estatísticas demográficas
-            # ----------------------------
-            st.subheader("Distribuição demográfica")
+    # -----------------------------
+    # SEPARAÇÃO FEATURES / META
+    # -----------------------------
+    meta_cols = [c for c in df.columns if c in ["genero", "fumante", "doenca", "label"]]
+    feature_cols = [c for c in df.columns if c not in meta_cols]
 
-            for col in ["genero", "fumante", "doenca"]:
-                if col in df_q.columns:
-                    fig, ax = plt.subplots()
-                    df_q[col].value_counts().plot(kind="bar", ax=ax)
-                    ax.set_title(f"Distribuição por {col}")
-                    st.pyplot(fig)
+    X = df[feature_cols].fillna(0.0)
 
-            # ----------------------------
-            # Dataset ML (1 amostra exemplo)
-            # ----------------------------
-            st.subheader("Features Raman (exemplo)")
-            df_feat = pd.DataFrame([features])
-            st.dataframe(df_feat, use_container_width=True)
+    # -----------------------------
+    # NORMALIZAÇÃO (PADRÃO ARTIGO)
+    # -----------------------------
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-            # ----------------------------
-            # ML (se houver labels)
-            # ----------------------------
-            if "doenca" in df_q.columns:
-                label = df_q["doenca"].iloc[0]
-                row = {**features, "label": label}
-                st.session_state.ml_dataset = pd.DataFrame([row])
+    # -----------------------------
+    # PCA
+    # -----------------------------
+    st.subheader("Análise de Componentes Principais (PCA)")
 
-                if st.button("🚀 Treinar Random Forest (demo)"):
-                    result = train_random_forest_from_features(
-                        st.session_state.ml_dataset,
-                        config=MLConfig(),
-                    )
-                    st.metric("Acurácia", f"{result.accuracy:.2f}")
-                    st.text(result.report_text)
+    n_components = st.slider(
+        "Número de componentes principais",
+        min_value=2,
+        max_value=min(10, X.shape[1]),
+        value=2,
+    )
+
+    pca = PCA(n_components=n_components)
+    X_pca = pca.fit_transform(X_scaled)
+
+    st.write(
+        "Variância explicada acumulada:",
+        np.cumsum(pca.explained_variance_ratio_),
+    )
+
+    # -----------------------------
+    # CLUSTERING
+    # -----------------------------
+    st.subheader("Clustering não supervisionado")
+
+    k = st.slider("Número de clusters (k)", 2, 6, 3)
+
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(X_pca)
+
+    df["cluster"] = clusters
+
+    # -----------------------------
+    # PLOT PCA
+    # -----------------------------
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sc = ax.scatter(
+        X_pca[:, 0],
+        X_pca[:, 1],
+        c=clusters,
+        cmap="tab10",
+        alpha=0.8,
+    )
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title("PCA + KMeans (dados Raman)")
+    plt.colorbar(sc, ax=ax, label="Cluster")
+    st.pyplot(fig)
+
+    # -----------------------------
+    # ESTATÍSTICA POR CLUSTER
+    # -----------------------------
+    st.subheader("Distribuição estatística por cluster")
+
+    if "genero" in df.columns:
+        st.write("Gênero × Cluster")
+        st.dataframe(pd.crosstab(df["cluster"], df["genero"]))
+
+    if "fumante" in df.columns:
+        st.write("Fumante × Cluster")
+        st.dataframe(pd.crosstab(df["cluster"], df["fumante"]))
+
+    if "doenca" in df.columns:
+        st.write("Doença × Cluster")
+        st.dataframe(pd.crosstab(df["cluster"], df["doenca"]))
